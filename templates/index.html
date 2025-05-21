@@ -1,0 +1,764 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="static/styles.css">
+    <title>Chatbot</title>
+</head>
+<body>
+    <!-- Chat Widget Container -->
+    <div class="chat-widget-container">
+        <!-- Main Chat Interface -->
+        <div class="chat-interface" id="chat-interface">
+            <!-- Header -->
+            <div class="header">
+                <div class="header-content">
+                    <!-- Menu button on the left -->
+                    <div class="menu-content"> 
+                        <button class="btn" onclick="toggleSidebar()">
+                            <span class="icon">
+                                <svg viewBox="0 0 175 80" width="40" height="40">
+                                    <rect width="80" height="15" fill="#f0f0f0" rx="10"></rect>
+                                    <rect y="30" width="80" height="15" fill="#f0f0f0" rx="10"></rect>
+                                    <rect y="60" width="80" height="15" fill="#f0f0f0" rx="10"></rect>
+                                </svg>
+                            </span>
+                            <span class="text">MENU</span>
+                        </button>
+                    </div>
+                    
+                    <!-- Centered logo and title -->
+                    <div class="brand-container">
+                        <img src="static/bot42.png" class="header-logo" title="Nicomatic" alt="Nicomate Logo">
+                        <div class="header-title">
+                            <span class="header-title2">NICO</span>MATE</div>
+                    </div>
+                    
+                    <!-- Close button on the right -->
+                    <div class="window-controls">
+                        <button class="button_maximize" onclick="toggleMaximize()">
+                          <div class="maximize-icon">
+                            <svg viewBox="0 0 24 24" width="20" height="20" xmlns="http://www.w3.org/2000/svg">
+                              <rect x="3" y="3" width="18" height="18" rx="2" ry="2" fill="none" stroke="#ffffff" stroke-width="2" />
+                              <rect x="8" y="8" width="8" height="8" rx="1" ry="1" fill="#ffffff" opacity="0.6" />
+                            </svg>
+                          </div>
+                        </button>
+                        <button class="button_down" onclick="toggleChat()">
+                            <div class="button-box">
+                              <span class="button-elem">
+                                <svg viewBox="0 0 46 40" xmlns="http://www.w3.org/2000/svg">
+                                  <path d="M46 20.038c0-.7-.3-1.5-.8-2.1l-16-17c-1.1-1-3.2-1.4-4.4-.3-1.2 1.1-1.2 3.3 0 4.4l11.3 11.9H3c-1.7 0-3 1.3-3 3s1.3 3 3 3h33.1l-11.3 11.9c-1 1-1.2 3.3 0 4.4 1.2 1.1 3.3.8 4.4-.3l16-17c.5-.5.8-1.1.8-1.9z">                                    
+                                  </path>
+                                </svg>
+                              </span>
+                              <span class="button-elem">
+                                <svg viewBox="0 0 46 40">
+                                  <path d="M46 20.038c0-.7-.3-1.5-.8-2.1l-16-17c-1.1-1-3.2-1.4-4.4-.3-1.2 1.1-1.2 3.3 0 4.4l11.3 11.9H3c-1.7 0-3 1.3-3 3s1.3 3 3 3h33.1l-11.3 11.9c-1 1-1.2 3.3 0 4.4 1.2 1.1 3.3.8 4.4-.3l16-17c.5-.5.8-1.1.8-1.9z">
+                                  </path>
+                                </svg>
+                              </span>
+                            </div>
+                          </button>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Sessions sidebar -->
+            <div class="sessions-sidebar" id="sessions-sidebar">
+                <div class="sidebar-header">
+                    <div class="sidebar-title">CHAT SESSIONS</div>
+                    <button class="close-sidebar" onclick="toggleSidebar()">×</button>
+                </div>
+                
+                <div class="sessions-list" id="sessions-list"></div>
+            </div>
+
+            <!-- Chat container -->
+            <div class="chat-container" id="messages">
+                <!-- Initial welcome message -->
+                <div class="message bot-message">
+                    <img src="static/test.jpg" class="avatar" alt="Chatbot Avatar">
+                    <div class="message-bubble bot-bubble">
+                        <p>Hello! Welcome to Nicomatic customer support chat. How can I assist you today?</p>
+                    </div>
+                </div>
+            </div>
+            
+            <!-- Quick suggestions -->
+            <div class="quick-suggestions">
+                <button class="suggestion-btn" onclick="sendQuickMessage('What are the dimensions of EMM for 20 pins?')">What are the dimensions of EMM for 20 pins?</button>
+                <button class="suggestion-btn" onclick="sendQuickMessage('I need a connector')">I need a connector</button>
+                <button class="suggestion-btn" onclick="sendQuickMessage('I need to talk to a human')">I need to talk to a human</button>
+            </div>
+
+            <!-- Input area -->
+            <div class="input-area">
+                <div class="input-buttons">
+                    <button class="btn-53" onclick="createNewSession()">
+                        <div class="original">NEW</div>
+                        <div class="letters">
+                          <span>N</span>
+                          <span>E</span>
+                          <span>W</span>
+                        </div>
+                    </button>
+                    
+                    <div tabindex="0" class="plusButton" onclick="sendSuggestion()">
+                        <svg class="plusIcon" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 30 30">
+                            <g mask="url(#mask0_21_345)">
+                                <path d="M13.75 23.75V16.25H6.25V13.75H13.75V6.25H16.25V13.75H23.75V16.25H16.25V23.75H13.75Z"></path>
+                            </g>
+                        </svg>
+                    </div>
+                </div>
+                
+                <div class="form-control"> 
+                    <input
+                        type="text"
+                        required=""
+                        id="user-input"
+                        placeholder="Type your message here..."
+                        class="input input-alt"
+                    />
+                    <span class="input-border input-border-alt"></span>
+                </div>
+                
+                <button class="action-btn" id="send-button" onclick="sendMessage()"></button>
+            </div>
+        </div>
+
+        <!-- Chat Toggle Button -->
+        <div class="chat-toggle-btn" id="chat-toggle-btn" onclick="toggleChat()">
+            <img src="static/bot4.png" alt="Chat" class="header-logo">
+            <div class="notification-badge" id="notification-badge" style="display: none;">1</div>
+        </div>
+    </div>
+
+    <script>
+        let currentSessionId = null;
+        let isChatOpen = false;
+        let unreadMessages = 0;
+        
+        // Toggle chat open/closed with animation
+        function toggleChat() {
+            const chatInterface = document.getElementById('chat-interface');
+            isChatOpen = !isChatOpen;
+            
+            if (isChatOpen) {
+                chatInterface.classList.add('active');
+                // Reset notification badge
+                unreadMessages = 0;
+                updateNotificationBadge();
+                // Focus input field
+                setTimeout(() => {
+                    document.getElementById('user-input').focus();
+                }, 400);
+            } else {
+                chatInterface.classList.remove('active');
+                // Also close sidebar if open
+                document.getElementById('sessions-sidebar').classList.remove('show-sidebar');
+            }
+        }
+        function toggleMaximize() {
+    const chatInterface = document.getElementById('chat-interface');
+    const chatToggleBtn = document.getElementById('chat-toggle-btn');
+    
+    // Check current state
+    const isCurrentlyFullscreen = chatInterface.classList.contains('fullscreen');
+    
+    // Remove any existing animation classes
+    chatInterface.classList.remove('fullscreen-active', 'minimize-active');
+    
+    // Force browser reflow to restart animation
+    void chatInterface.offsetWidth;
+    
+    if (!isCurrentlyFullscreen) {
+        // MAXIMIZING: First position the element before animation 
+        // (ensures it expands from the correct position)
+        chatInterface.style.transformOrigin = 'top right';
+        
+        // Then apply fullscreen class and animation
+        chatInterface.classList.add('fullscreen');
+        chatInterface.classList.add('fullscreen-active');
+        
+        // Hide the chat toggle button when in fullscreen mode
+        chatToggleBtn.style.display = 'none';
+        
+        // Ensure we're not also showing sidebar
+        document.getElementById('sessions-sidebar').classList.remove('show-sidebar');
+        
+        // Update icon for fullscreen mode
+        const maximizeIcon = document.querySelector('.maximize-icon');
+        maximizeIcon.innerHTML = `
+        <svg viewBox="0 0 24 24" width="20" height="20" xmlns="http://www.w3.org/2000/svg">
+            <path d="M3 8V5a2 2 0 0 1 2-2h3" fill="none" stroke="#ffffff" stroke-width="2" />
+            <path d="M21 8V5a2 2 0 0 0-2-2h-3" fill="none" stroke="#ffffff" stroke-width="2" />
+            <path d="M3 16v3a2 2 0 0 0 2 2h3" fill="none" stroke="#ffffff" stroke-width="2" />
+            <path d="M21 16v3a2 2 0 0 1-2 2h-3" fill="none" stroke="#ffffff" stroke-width="2" />
+        </svg>
+        `;
+        
+        // Keep chat open state as true
+        isChatOpen = true;
+    } else {
+        // MINIMIZING: First ensure the transform origin is correct
+        chatInterface.style.transformOrigin = 'top right';
+        
+        // Apply minimize animation
+        chatInterface.classList.add('minimize-active');
+        
+        // Show the chat toggle button when exiting fullscreen mode
+        chatToggleBtn.style.display = 'flex';
+        
+        // Update icon for normal mode
+        const maximizeIcon = document.querySelector('.maximize-icon');
+        maximizeIcon.innerHTML = `
+        <svg viewBox="0 0 24 24" width="20" height="20" xmlns="http://www.w3.org/2000/svg">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2" fill="none" stroke="#ffffff" stroke-width="2" />
+            <rect x="8" y="8" width="8" height="8" rx="1" ry="1" fill="#ffffff" opacity="0.6" />
+        </svg>
+        `;
+        
+        // Remove fullscreen class after animation completes
+        setTimeout(() => {
+            chatInterface.classList.remove('fullscreen');
+            // Reset any inline styles
+            chatInterface.style.transformOrigin = '';
+        }, 300);
+        
+        // Keep chat open state as true
+        isChatOpen = true;
+    }
+    
+    // Scroll to bottom when maximizing in case content shifted
+    setTimeout(() => {
+        scrollToBottom();
+    }, 300);
+}
+
+        // Toggle sessions sidebar with animation
+        function toggleSidebar() {
+            document.getElementById('sessions-sidebar').classList.toggle('show-sidebar');
+        }
+
+        // Update notification badge with animation
+        function updateNotificationBadge() {
+            const badge = document.getElementById('notification-badge');
+            if (unreadMessages > 0 && !isChatOpen) {
+                badge.textContent = unreadMessages;
+                badge.style.display = 'flex';
+            } else {
+                badge.style.display = 'none';
+            }
+        }
+
+        // Create new session with enhanced UI feedback
+        // Replace the createNewSession function with this version
+function createNewSession() {
+    // Add loading state to the NEW button
+    const newBtn = document.querySelector('.btn-53');
+    newBtn.style.opacity = '0.7';
+    newBtn.disabled = true;
+    
+    fetch('/new_session', {
+        method: 'POST'
+    })
+    .then(response => {
+        if (!response.ok) throw new Error('Network response was not ok');
+        return response.json();
+    })
+    .then(data => {
+        const sessionId = data.sessionId; 
+        const chatId = data.chatId; 
+        const sessionsList = document.getElementById('sessions-list');
+        const sessionElement = document.createElement('div');
+        sessionElement.className = 'session-item';
+        sessionElement.setAttribute('data-session-id', sessionId);
+        sessionElement.innerHTML = `<span>${chatId}</span>
+            <button class="delete-session" onclick="deleteSession('${sessionId}')">×</button>`;
+        sessionElement.addEventListener('click', () => {
+            switchSession(sessionId);
+        });
+        sessionsList.appendChild(sessionElement);
+        switchSession(sessionId);
+        
+        // IMPORTANT: Do NOT toggle sidebar on initial page load
+        // Only toggle if this isn't the first session creation
+        if (document.querySelectorAll('.session-item').length > 1) {
+            setTimeout(() => {
+                toggleSidebar();
+            }, 300);
+        }
+    })
+    .catch(error => {
+        console.error('Error creating new session:', error);
+        alert('There was an error creating a new session. Please try again.');
+    })
+    .finally(() => {
+        // Reset button state
+        newBtn.style.opacity = '1';
+        newBtn.disabled = false;
+    });
+}
+
+
+
+        // Switch to different session with animation
+        function switchSession(sessionId) {
+            document.querySelectorAll('.session-item').forEach(item => {
+                item.classList.remove('active');
+            });
+            const sessionElement = document.querySelector(`[data-session-id="${sessionId}"]`);
+            if (sessionElement) {
+                sessionElement.classList.add('active');
+            }
+            currentSessionId = sessionId;
+            
+            // Add loading animation
+            const messagesDiv = document.getElementById('messages');
+            messagesDiv.innerHTML = `
+                <div class="loading-container" style="height: 100%; display: flex; align-items: center; justify-content: center;">
+                    <svg class="pl" width="240" height="240" viewBox="0 0 240 240">
+                        <circle class="pl__ring pl__ring--a" cx="120" cy="120" r="105" fill="none" stroke="#000" stroke-width="20" stroke-dasharray="0 660" stroke-dashoffset="-330" stroke-linecap="round"></circle>
+                        <circle class="pl__ring pl__ring--b" cx="120" cy="120" r="35" fill="none" stroke="#000" stroke-width="20" stroke-dasharray="0 220" stroke-dashoffset="-110" stroke-linecap="round"></circle>
+                        <circle class="pl__ring pl__ring--c" cx="85" cy="120" r="70" fill="none" stroke="#000" stroke-width="20" stroke-dasharray="0 440" stroke-linecap="round"></circle>
+                        <circle class="pl__ring pl__ring--d" cx="155" cy="120" r="70" fill="none" stroke="#000" stroke-width="20" stroke-dasharray="0 440" stroke-linecap="round"></circle>
+                    </svg>
+                </div>`;
+            
+            fetch(`/session/${sessionId}`) 
+                .then(response => {
+                    if (!response.ok) throw new Error('Network response was not ok');
+                    return response.json();
+                })
+                .then(data => {
+                    messagesDiv.innerHTML = '';
+                    data.messages.forEach(message => {
+                        let messageHtml;
+
+                        if (message.sender === 'user') {
+                            messageHtml = `
+                                <div class="message user-message">
+                                    <img src="static/user.png" class="avatar" alt="User Avatar">
+                                    <div class="message-bubble user-bubble">
+                                        <p>${message.content}</p>
+                                    </div>
+                                </div>`;
+                        } else if (message.sender === 'bot') {
+                            messageHtml = `
+                                <div class="message bot-message">
+                                    <img src="static/test.jpg" class="avatar" alt="Chatbot Avatar">
+                                    <div class="message-bubble bot-bubble">
+                                        <p>${message.content}</p>
+                                    </div>
+                                </div>`;
+                        } else if (message.sender === 'system') {
+                            messageHtml = `
+                                <div class="message user-message">
+                                    <img src="static/system.png" class="avatar" alt="System Avatar">
+                                    <div class="message-bubble user-bubble" style="background-color: #e0d7ff;">
+                                        <p>${message.content}</p>
+                                    </div>
+                                </div>`;
+                        }
+
+                        messagesDiv.innerHTML += messageHtml;
+                    });
+                    
+                    // If no messages, add welcome message
+                    if (data.messages.length === 0) {
+                        messagesDiv.innerHTML = `
+                            <div class="message bot-message">
+                                <img src="static/test.jpg" class="avatar" alt="Chatbot Avatar">
+                                <div class="message-bubble bot-bubble">
+                                    <p>Hello! Welcome to Nicomatic customer support chat. How can I assist you today?</p>
+                                </div>
+                            </div>`;
+                    }
+                    
+                    scrollToBottom();
+                })
+                .catch(error => {
+                    console.error('Error fetching session messages:', error);
+                    messagesDiv.innerHTML = `
+                        <div class="message bot-message">
+                            <img src="static/test.jpg" class="avatar" alt="Chatbot Avatar">
+                            <div class="message-bubble bot-bubble">
+                                <p>Sorry, there was an error loading your chat history. Please try refreshing.</p>
+                            </div>
+                        </div>`;
+                });
+        }
+
+        // Delete session with confirmation
+        function deleteSession(sessionId) {
+            // Prevent event propagation
+            event.stopPropagation();
+            
+            // Add confirmation
+            if (confirm('Are you sure you want to delete this chat session?')) {
+                const sessionElement = document.querySelector(`[data-session-id="${sessionId}"]`);
+                if (sessionElement) {
+                    // Add fade-out animation
+                    sessionElement.style.transition = 'all 0.3s';
+                    sessionElement.style.opacity = '0';
+                    sessionElement.style.transform = 'translateX(-20px)';
+                    
+                    setTimeout(() => {
+                        sessionElement.remove();
+                        if (currentSessionId === sessionId) {
+                            createNewSession();
+                        }
+                    }, 300);
+                }
+            }
+        }
+
+        // Smooth scroll to bottom of messages
+        function scrollToBottom() {
+            const messagesDiv = document.getElementById('messages');
+            messagesDiv.scrollTo({
+                top: messagesDiv.scrollHeight,
+                behavior: 'smooth'
+            });
+        }
+        
+        // Send suggestion (with improved UI feedback)
+        async function sendSuggestion() {
+            if (!currentSessionId) {
+                createNewSession();
+                return;
+            }
+            const input = document.getElementById('user-input');
+            const suggestion = input.value.trim();
+            if (!suggestion) return;
+            input.value = ''; 
+            
+            // Disable buttons during sending
+            document.querySelector('.plusButton').style.opacity = '0.7';
+            document.querySelector('.plusButton').style.pointerEvents = 'none';
+
+            const messagesDiv = document.getElementById('messages');
+            const userSuggestionHtml = `
+                <div class="message user-message">
+                    <img src="static/system.png" class="avatar" alt="System Avatar">
+                    <div class="message-bubble user-bubble" style="background-color: #e0d7ff;">
+                        <p>${suggestion}</p>
+                    </div>
+                </div>`;
+            messagesDiv.innerHTML += userSuggestionHtml;
+            scrollToBottom();
+
+            try {
+                const response = await fetch('/suggestion', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: suggestion, sessionId: currentSessionId })
+                });
+                if (!response.ok) throw new Error('Network response was not ok');
+            } catch (error) {
+                messagesDiv.innerHTML += `
+                    <div class="message bot-message">
+                        <img src="static/test.jpg" class="avatar" alt="Chatbot Avatar">
+                        <div class="message-bubble bot-bubble error-message">
+                            <p>Error: ${error.message}</p>
+                        </div>
+                    </div>`;
+                scrollToBottom();
+            } finally {
+                // Re-enable button
+                document.querySelector('.plusButton').style.opacity = '1';
+                document.querySelector('.plusButton').style.pointerEvents = 'auto';
+            }
+        }
+        
+        // For quick suggestion buttons
+        function sendQuickMessage(message) {
+            const input = document.getElementById('user-input');
+            input.value = message;
+            sendMessage();
+        }
+
+        // Send message with improved animations and handling
+        <!-- Modify the sendMessage function to handle source links -->
+
+    async function sendMessage() {
+        if (!currentSessionId) {
+            createNewSession();
+            return;
+        }
+        const input = document.getElementById('user-input');
+        const message = input.value.trim();
+        if (!message) return;
+        input.value = '';
+        
+        // Disable send button
+        const button = document.getElementById('send-button');
+        button.disabled = true;
+        button.style.opacity = '0.7';
+        
+        const messagesDiv = document.getElementById('messages');
+        const userMessageHtml = `
+            <div class="message user-message">
+                <img src="static/user.png" class="avatar" alt="User Avatar">
+                <div class="message-bubble user-bubble">
+                    <p>${message}</p>
+                </div>
+            </div>`;
+        
+        messagesDiv.innerHTML += userMessageHtml;
+        scrollToBottom();
+
+        const loadingMessage = document.createElement('div');
+        loadingMessage.className = 'message bot-message loading-message';
+        loadingMessage.innerHTML = `
+            <img src="static/test.jpg" class="avatar" alt="Chatbot Avatar">
+            <div class="message-bubble bot-bubble">
+                <div class="loading-container">
+                    <svg class="pl" width="240" height="240" viewBox="0 0 240 240">
+                        <circle class="pl__ring pl__ring--a" cx="120" cy="120" r="105" fill="none" stroke="#000" stroke-width="20" stroke-dasharray="0 660" stroke-dashoffset="-330" stroke-linecap="round"></circle>
+                        <circle class="pl__ring pl__ring--b" cx="120" cy="120" r="35" fill="none" stroke="#000" stroke-width="20" stroke-dasharray="0 220" stroke-dashoffset="-110" stroke-linecap="round"></circle>
+                        <circle class="pl__ring pl__ring--c" cx="85" cy="120" r="70" fill="none" stroke="#000" stroke-width="20" stroke-dasharray="0 440" stroke-linecap="round"></circle>
+                        <circle class="pl__ring pl__ring--d" cx="155" cy="120" r="70" fill="none" stroke="#000" stroke-width="20" stroke-dasharray="0 440" stroke-linecap="round"></circle>
+                    </svg>
+                </div>
+            </div>`;
+        messagesDiv.appendChild(loadingMessage);
+        scrollToBottom();
+
+        try {
+            const response = await fetch('/chat', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ 
+                    message,
+                    sessionId: currentSessionId
+                })
+            });
+
+            if (!response.ok) throw new Error('Network response was not ok');
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder('utf-8');
+            
+            // If chat is minimized, increment unread counter
+            if (!isChatOpen) {
+                unreadMessages++;
+                updateNotificationBadge();
+            }
+            
+            while (true) {
+                const { done, value } = await reader.read();
+                if (done) break; 
+                const chunk = decoder.decode(value, { stream: true });
+                resultText = chunk;
+                
+                try {
+                    const jsonData = JSON.parse(resultText);
+                    
+                    // Check if this is a question with images
+                    if (jsonData.type === "question_with_images") {
+                        // Remove any existing loading message
+                        const loadingElements = document.getElementsByClassName('loading-message');
+                        while (loadingElements.length > 0) {
+                            loadingElements[0].remove();
+                        }
+                        
+                        // Build image HTML
+                        let imagesHtml = '<div class="images-container">';
+                        jsonData.images.forEach(imagePath => {
+                            imagesHtml += `<img src="${imagePath}" alt="Connector Pitch" class="response-image" onload="scrollToBottom()">`;
+                        });
+                        imagesHtml += '</div>';
+                        
+                        const messageWithImages = `
+                            <div class="message bot-message">
+                                <img src="static/test.jpg" class="avatar" alt="Chatbot Avatar">
+                                <div class="message-bubble bot-bubble">
+                                    <p>${jsonData.question}</p>
+                                    ${imagesHtml}
+                                </div>
+                            </div>`;
+                        
+                        messagesDiv.innerHTML += messageWithImages;
+                        scrollToBottom();
+                    }
+                } catch (jsonError) {
+                    const loadingElements = document.getElementsByClassName('loading-message');
+                    while (loadingElements.length > 0) {
+                        loadingElements[0].remove();
+                    }
+
+                    // Check if the message has source links that need to be hidden
+                    let messageContent = chunk;
+                    let processedSourceLinks = '';
+                    let linkCount = 0;
+                    
+                    // Parse out source links if they exist
+                    if (messageContent.includes('View source documentation:')) {
+                        const parts = messageContent.split('View source documentation:');
+                        messageContent = parts[0].trim();
+                        
+                        // Extract the sources section
+                        if (parts.length > 1) {
+                            let sourcesText = parts[1];
+                            
+                            // Count links before processing
+                            const linkMatches = sourcesText.match(/(https?:\/\/[^\s]+)/g) || [];
+                            linkCount = linkMatches.length;
+                            
+                            // Process links to make them clickable
+                            sourcesText = sourcesText.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" class="source-link">$1</a>');
+                            
+                            processedSourceLinks = '<div class="source-links" style="display: none;"><p><strong>View source documentation:</strong></p>' + sourcesText + '</div>';
+                        }
+                    }
+                    
+                    // Create the message with toggle button if there are sources
+                    let toggleButton = '';
+                    if (processedSourceLinks) {
+                        toggleButton = `<button class="source-toggle-btn" onclick="toggleSourceLinks(this)">
+                            <span class="source-btn-text">Show Sources</span>
+                            <span class="source-count">${linkCount}</span>
+                        </button>`;
+                    }
+                    
+                    const regularMessage = `
+                        <div class="message bot-message">
+                            <img src="static/test.jpg" class="avatar" alt="Chatbot Avatar">
+                            <div class="message-bubble bot-bubble">
+                                ${messageContent.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" class="chat-link">$1</a>').replace(/\n/g, "<br>")}
+                                ${toggleButton}
+                                ${processedSourceLinks}
+                            </div>
+                        </div>`;
+                    
+                    // Add the message to the chat
+                    messagesDiv.innerHTML += regularMessage;
+                    scrollToBottom();
+                }
+            }
+
+        } catch (error) {
+            messagesDiv.innerHTML += `
+                <div class="message bot-message">
+                    <img src="static/test.jpg" class="avatar" alt="Chatbot Avatar">
+                    <div class="message-bubble bot-bubble error-message">
+                        <p>Sorry, there was an error processing your message: ${error.message}</p>
+                        <p>Please try again later.</p>
+                    </div>
+                </div>`;
+            scrollToBottom();
+        } finally {
+            // Clean up any remaining loading message
+            const loadingElements = messagesDiv.getElementsByClassName('loading-message');
+            while (loadingElements.length > 0) {
+                loadingElements[0].remove();
+            }
+            button.disabled = false;
+            button.style.opacity = '1';
+            
+            // Final scroll after everything is complete
+            setTimeout(scrollToBottom, 100);
+        }
+    }
+
+    // Function to toggle visibility of source links
+    function toggleSourceLinks(button) {
+        const sourcesDiv = button.nextElementSibling;
+        const buttonText = button.querySelector('.source-btn-text');
+        const isVisible = sourcesDiv.style.display !== 'none';
+        
+        if (isVisible) {
+            sourcesDiv.style.display = 'none';
+            sourcesDiv.classList.remove('visible');
+            buttonText.textContent = 'Show Sources';
+        } else {
+            sourcesDiv.style.display = 'block';
+            sourcesDiv.classList.add('visible');
+            buttonText.textContent = 'Hide Sources';
+        }
+        
+        // Scroll to ensure content remains visible
+        setTimeout(scrollToBottom, 100);
+    }
+    function generateSourceButton(sourcesContent) {
+    // Count the number of sources by counting link occurrences
+    const linkCount = (sourcesContent.match(/(https?:\/\/[^\s]+)/g) || []).length;
+    
+    // Create button with count
+    return `<button class="source-toggle-btn" onclick="toggleSourceLinks(this)">
+              <span class="source-btn-text">Show Sources</span>
+              <span class="source-count">${linkCount}</span>
+            </button>`;
+}
+    // Function to toggle visibility of source links
+    function toggleSourceLinks(button) {
+    const sourcesDiv = button.nextElementSibling;
+    const isVisible = sourcesDiv.style.display !== 'none';
+    const btnText = button.querySelector('.source-btn-text');
+    
+    if (isVisible) {
+        sourcesDiv.style.display = 'none';
+        btnText.textContent = 'Show Sources';
+    } else {
+        sourcesDiv.style.display = 'block';
+        btnText.textContent = 'Hide Sources';
+    }
+    
+    // Scroll to ensure content remains visible
+    setTimeout(scrollToBottom, 100);
+}
+
+
+        // Add event listeners
+        document.addEventListener('DOMContentLoaded', function() {
+    // Send button and Enter key
+    const userInput = document.getElementById('user-input');
+    userInput.addEventListener('keypress', (event) => {
+        if (event.key === 'Enter' && !event.shiftKey) {
+            event.preventDefault();
+            sendMessage();
+        } else if (event.key === 'Enter' && event.shiftKey) {
+            const cursorPos = userInput.selectionStart;
+            const textBefore = userInput.value.substring(0, cursorPos);
+            const textAfter = userInput.value.substring(cursorPos);
+            userInput.value = textBefore + '\n' + textAfter;
+            userInput.selectionStart = userInput.selectionEnd = cursorPos + 1; 
+        }
+    });
+
+    // Create first session
+    createNewSession();
+    
+    // Show the chat button initially
+    document.getElementById('chat-toggle-btn').style.display = 'flex';
+    
+    // Ensure chat interface is displayed immediately
+    const chatInterface = document.getElementById('chat-interface');
+    chatInterface.classList.add('active');
+    isChatOpen = true;
+
+            // Automatically open chat after a short delay
+            setTimeout(() => {
+                if (!isChatOpen) {
+                    toggleChat();
+                }
+            }, 1000);
+        });
+        // Add keyboard shortcut for ESC key to exit fullscreen
+            document.addEventListener('keydown', function(event) {
+            if (event.key === 'Escape') {
+                const chatInterface = document.getElementById('chat-interface');
+                if (chatInterface.classList.contains('fullscreen')) {
+                toggleMaximize();
+                }
+            }
+            });
+    </script>
+</body>
+</html>

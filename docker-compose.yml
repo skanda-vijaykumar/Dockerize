@@ -1,0 +1,105 @@
+version: '3.12'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:15-alpine
+    container_name: nicomatic-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: aspirine13z
+      POSTGRES_DB: alexis
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./postgres-init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # Ollama LLM Service
+  ollama:
+    image: ollama/ollama:latest
+    container_name: nicomatic-ollama
+    restart: always
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+    # Add GPU support
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://localhost:11434/api/tags || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # FastAPI Application
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: nicomatic-app
+    restart: always
+    ports:
+      - "8000:8000"
+    volumes:
+      -  ${PWD}/extracted_best:/app/extracted_best
+      -  ${PWD}/extracted_best/lab:/app/extracted_best/lab
+
+
+    depends_on:
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+    # App should check itself, not Ollama
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    environment:
+      - POSTGRES_HOST=postgres
+      - POSTGRES_USER=postgres
+      - POSTGRES_PASSWORD=aspirine13z
+      - POSTGRES_DB=alexis
+      - OLLAMA_HOST=ollama
+      - OLLAMA_PORT=11434
+      - TAVILY_API_KEY=${TAVILY_API_KEY}
+      - SERPER_API_KEY=${SERPER_API_KEY}
+      - DATA_DIR=/app/extracted_best
+
+  # Model Initialization Service
+  model-init:
+    image: curlimages/curl:latest
+    container_name: model-initializer
+    depends_on:
+      ollama:
+        condition: service_started  # Changed from service_healthy
+    restart: "no"
+    entrypoint: ["/bin/sh", "-c"]
+    command:
+      - |
+        echo "Waiting for Ollama to be fully ready..."
+        sleep 10
+        echo "Pulling llama3.1 model (this may take several minutes)..."
+        curl -X POST http://ollama:11434/api/pull -d '{"name":"llama3.1"}'
+        echo "Pulling nomic-embed-text model..."
+        curl -X POST http://ollama:11434/api/pull -d '{"name":"nomic-embed-text"}'
+        echo "Model initialization complete!"
+
+volumes:
+  postgres_data:
+  ollama_data:
