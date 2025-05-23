@@ -3634,7 +3634,7 @@ async def chat(request: Request):
                                         page_number = metadata.get("page_number", 1) 
 
                                         ## build the link
-                                        link = ( f"\n- {file_base}: http://172.30.2.97:8000/source_document/{encoded_path}#page={page_number}")
+                                        link = ( f"\n- {file_base}: /source_document/{encoded_path}#page={page_number}")
                                         link_parts.add(link)
 
                                 if link_parts:
@@ -3858,19 +3858,48 @@ async def get_source_document(file_path: str, page: int = 1):
     try:
         # Decode the file path
         decoded_path = urllib.parse.unquote(file_path)
-
+        print(f"Requested document path: {decoded_path}")
         # Check if the file exists
         if not os.path.exists(decoded_path):
-            raise HTTPException(status_code=404, detail="Source document not found") 
+            # Try alternative paths
+            
+            # 1. Try with base filename in extracted_best directory
+            base_filename = os.path.basename(decoded_path)
+            alt_path1 = os.path.join("./extracted_best", base_filename)
+            
+            # 2. Try with base filename in lab directory
+            alt_path2 = os.path.join("./extracted_best/lab", base_filename)
+            
+            # 3. Try absolute path within Docker container
+            container_path = os.path.join("/app/extracted_best", base_filename)
+            
+            # 4. Try replacing app path with local path
+            local_path = decoded_path.replace("/app/", "./")
+            
+            # Check all alternatives
+            possible_paths = [alt_path1, alt_path2, container_path, local_path]
+            
+            found = False
+            for path in possible_paths:
+                if os.path.exists(path):
+                    decoded_path = path
+                    found = True
+                    print(f"Found document at: {decoded_path}")
+                    break
+            
+            if not found:
+                print(f"Document not found at any of these paths: {possible_paths}")
+                raise HTTPException(status_code=404, detail="Source document not found")
 
-        _, ext = os.path.splitext(decoded_path) 
-        ext = ext.lower() 
+        # Continue with serving the file
+        _, ext = os.path.splitext(decoded_path)
+        ext = ext.lower()
 
         if ext == ".pdf":
             # Serve the PDF with a page hint
-            response = FileResponse(decoded_path, media_type="application/pdf") 
-            response.headers["Content-Disposition"] = (f"inline; filename={os.path.basename(decoded_path)}")
-            return response 
+            response = FileResponse(decoded_path, media_type="application/pdf")
+            response.headers["Content-Disposition"] = f"inline; filename={os.path.basename(decoded_path)}"
+            return response
         else:
             try:
                 with open(decoded_path, "r", encoding="utf-8") as file: 
