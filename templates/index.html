@@ -607,12 +607,13 @@ function createNewSession() {
                         if (parts.length > 1) {
                             let sourcesText = parts[1];
                             
-                            // Count links before processing
-                            const linkMatches = sourcesText.match(/(https?:\/\/[^\s]+)/g) || [];
+                            // Count links before processing - now includes relative URLs
+                            const linkMatches = sourcesText.match(/((?:https?:\/\/|\/)[^\s]+)/g) || [];
                             linkCount = linkMatches.length;
                             
-                            // Process links to make them clickable
+                            // Process both absolute and relative links to make them clickable
                             sourcesText = sourcesText.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" class="source-link">$1</a>');
+                            sourcesText = sourcesText.replace(/(?<!href=")(\/source_document\/[^\s]+)/g, '<a href="$1" target="_blank" class="source-link">View Document</a>');
                             
                             processedSourceLinks = '<div class="source-links" style="display: none;"><p><strong>View source documentation:</strong></p>' + sourcesText + '</div>';
                         }
