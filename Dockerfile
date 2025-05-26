@@ -11,7 +11,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 # Copy requirements first to leverage Docker cache
 COPY requirements.txt .
-
+RUN pip uninstall -y FlagEmbedding || true
+RUN pip install git+https://github.com/FlagOpen/FlagEmbedding.git#egg=FlagEmbedding
 # Install Python dependencies
 RUN pip install --no-cache-dir -r requirements.txt
 
@@ -34,5 +35,5 @@ RUN echo 'from fastapi import FastAPI\n\napp = FastAPI()\n\n@app.get("/health")\
 EXPOSE 8000
 
 # Command to run the application
-CMD ["bash", "-c", "python3 /app/reranker_patch.py && uvicorn route18:app --host 0.0.0.0 --port 8000"]
+CMD ["bash", "-c", "uvicorn route18:app --host 0.0.0.0 --port 8000"]
 
