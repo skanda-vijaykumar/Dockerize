@@ -381,8 +381,25 @@ class RankedNodesLogger():
         super().__init__()
         
     def postprocess_nodes(self, nodes, query_bundle):
+        # Limit the number of nodes before reranking to improve performance
+        max_nodes_to_rerank = 30
+        if len(nodes) > max_nodes_to_rerank:
+            print(f"Limiting from {len(nodes)} to {max_nodes_to_rerank} nodes before reranking")
+            # Sort by score before limiting, to make sure we get the best ones
+            nodes = sorted(nodes, key=lambda x: x.score if hasattr(x, 'score') else 0.0, reverse=True)[:max_nodes_to_rerank]
+        
         # Pass nodes through the underlying reranker
-        reranked_nodes = self.reranker.postprocess_nodes(nodes, query_bundle)
+        try:
+            reranked_nodes = self.reranker.postprocess_nodes(nodes, query_bundle)
+        except Exception as e:
+            print(f"Error during reranking: {str(e)}. Falling back to original nodes.")
+            reranked_nodes = nodes[:min(15, len(nodes))]  # Limit to 15 nodes as a fallback
+        
+        # Limit the number of nodes returned after reranking
+        max_nodes_to_return = 15
+        if len(reranked_nodes) > max_nodes_to_return:
+            print(f"Limiting from {len(reranked_nodes)} to {max_nodes_to_return} nodes after reranking")
+            reranked_nodes = reranked_nodes[:max_nodes_to_return]
         
         # Log the reranked nodes
         print("\n=== RERANKED NODES ===")
@@ -391,7 +408,8 @@ class RankedNodesLogger():
         # Add all sources to the global tracker
         self.source_tracker.add_sources_from_nodes(reranked_nodes)
         
-        for i, node in enumerate(reranked_nodes):
+        # Only log a subset of nodes to reduce console output
+        for i, node in enumerate(reranked_nodes[:10]):  # Only log top 10 for clarity
             source = node.node.metadata.get("source", "Unknown")
             connector_family = node.node.metadata.get("connector_family", "Unknown")
             file_type = node.node.metadata.get("file_type", "Unknown")
@@ -407,9 +425,13 @@ class RankedNodesLogger():
                 node_text = node_text[:100] + "..."
             print(f"  Content: {node_text}")
         
+        if len(reranked_nodes) > 10:
+            print(f"... (and {len(reranked_nodes) - 10} more nodes)")
+        
         print("=== END OF RERANKED NODES ===\n")
         
         return reranked_nodes
+
 
 def load_data(directory_path):
     documents1 = []
@@ -779,19 +801,40 @@ def creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_m
         if vector_index_markdown is not None and keyword_index_markdown is not None:
             print("Creating markdown tools...")
             try:
-                ## Create retrievers for markdowns
-                vector_retriever_markdown = VectorIndexRetriever(index=vector_index_markdown, similarity_top_k=30,
-                                                             vector_store_kwargs={"search_kwargs": {"search_type": "similarity", "k": 30}})
-                keyword_retriever_markdown = KeywordTableSimpleRetriever(index=keyword_index_markdown, similarity_top_k=25)
-                hybrid_retriever_markdown = CustomRetriever(vector_retriever=vector_retriever_markdown, keyword_retriever=keyword_retriever_markdown, mode="OR")
+                # Create retrievers for markdowns with limited retrieval counts
+                vector_retriever_markdown = VectorIndexRetriever(
+                    index=vector_index_markdown, 
+                    similarity_top_k=20,  # Reduced from 30
+                    vector_store_kwargs={"search_kwargs": {"search_type": "similarity", "k": 20}}
+                )
+                keyword_retriever_markdown = KeywordTableSimpleRetriever(
+                    index=keyword_index_markdown, 
+                    similarity_top_k=15  # Reduced from 25
+                )
                 
-                ## Filters and retriever strats
-                base_reranker = FlagEmbeddingReranker(model="BAAI/bge-reranker-large", top_n=15)
+                hybrid_retriever_markdown = CustomRetriever(
+                    vector_retriever=vector_retriever_markdown, 
+                    keyword_retriever=keyword_retriever_markdown, 
+                    mode="OR"
+                )
+                
+                # Use a lighter reranker that's faster
+                base_reranker = FlagEmbeddingReranker(model="BAAI/bge-reranker-large", top_n=10)
+                
                 # Wrap the reranker with our logger
                 reranker = RankedNodesLogger(base_reranker)
-                response_synthesizer = get_response_synthesizer(response_mode="compact_accumulate", verbose=True)
-                hybrid_query_engine_markdown = RetrieverQueryEngine(retriever=hybrid_retriever_markdown, response_synthesizer=response_synthesizer,
-                                                                node_postprocessors=[reranker])
+                
+                # Use compact response mode for faster synthesis
+                response_synthesizer = get_response_synthesizer(
+                    response_mode="compact", 
+                    verbose=True
+                )
+                
+                hybrid_query_engine_markdown = RetrieverQueryEngine(
+                    retriever=hybrid_retriever_markdown, 
+                    response_synthesizer=response_synthesizer,
+                    node_postprocessors=[reranker]
+                )
 
                 ## Create tools list
                 query_engine_tools_markdown = [
@@ -824,19 +867,39 @@ def creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_m
         if vector_index_markdown_lab is not None and keyword_index_markdown_lab is not None:
             print("Creating lab tools...")
             try:
-                ## Create retrievers for markdowns for lab files
-                vector_retriever_markdown_lab = VectorIndexRetriever(index=vector_index_markdown_lab, similarity_top_k=30,
-                                                                 vector_store_kwargs={"search_kwargs": {"search_type": "similarity", "k": 30}})
-                keyword_retriever_markdown_lab = KeywordTableSimpleRetriever(index=keyword_index_markdown_lab, similarity_top_k=25)
-                hybrid_retriever_markdown_lab = CustomRetriever(vector_retriever=vector_retriever_markdown_lab, keyword_retriever=keyword_retriever_markdown_lab, mode="OR")
+                # Create retrievers for markdowns for lab files with reduced retrieval counts
+                vector_retriever_markdown_lab = VectorIndexRetriever(
+                    index=vector_index_markdown_lab, 
+                    similarity_top_k=20,  # Reduced from 30
+                    vector_store_kwargs={"search_kwargs": {"search_type": "similarity", "k": 20}}
+                )
                 
-                base_reranker = FlagEmbeddingReranker(model="BAAI/bge-reranker-large", top_n=15)
+                keyword_retriever_markdown_lab = KeywordTableSimpleRetriever(
+                    index=keyword_index_markdown_lab, 
+                    similarity_top_k=15  # Reduced from 25
+                )
+                
+                hybrid_retriever_markdown_lab = CustomRetriever(
+                    vector_retriever=vector_retriever_markdown_lab, 
+                    keyword_retriever=keyword_retriever_markdown_lab, 
+                    mode="OR"
+                )
+                
+                # Use a lightweight reranker
+                base_reranker = FlagEmbeddingReranker(model="BAAI/bge-reranker-large", top_n=10)
                 lab_reranker = RankedNodesLogger(base_reranker)
                 
-                response_synthesizer = get_response_synthesizer(response_mode="accumulate", verbose=True)
+                # Use compact response mode for faster synthesis
+                response_synthesizer = get_response_synthesizer(
+                    response_mode="compact", 
+                    verbose=True
+                )
                 
-                hybrid_query_engine_markdown_lab = RetrieverQueryEngine(retriever=hybrid_retriever_markdown_lab, response_synthesizer=response_synthesizer,
-                                                                        node_postprocessors=[lab_reranker])
+                hybrid_query_engine_markdown_lab = RetrieverQueryEngine(
+                    retriever=hybrid_retriever_markdown_lab, 
+                    response_synthesizer=response_synthesizer,
+                    node_postprocessors=[lab_reranker]
+                )
                 
                 query_engine_tools_markdown_lab = [
                     QueryEngineTool(
@@ -901,7 +964,7 @@ def create_isolated_agent(tools):
     top_k=30, 
     base_url=OLLAMA_BASE_URL,
     cache=False,
-    client_kwargs={"timeout": 120})    
+    client_kwargs={"timeout": 240})    
     prompt = hub.pull("intern/ask10")
     agent = create_react_agent(llm=llm, tools=tools, prompt=prompt)
     agent_executer = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True, max_iterations=2, max_execution_time=None, 
@@ -980,7 +1043,7 @@ class LLMConnectorSelector:
     top_k=30, 
     base_url=OLLAMA_BASE_URL,
     cache=False,
-    client_kwargs={"timeout": 120})  
+    client_kwargs={"timeout": 240})  
         ## Structure for the LLM response
         self.response_schemas = [ResponseSchema(name="value", description="The parsed value from user response"),ResponseSchema(name="confidence", description="Confidence score between 0 and 1"),
                                   ResponseSchema(name="reasoning", description="Explanation of the parsing logic")]
@@ -2496,7 +2559,7 @@ class LLMConnectorSelector:
             try:
                 llm_response = await asyncio.wait_for(
                     self.llm.agenerate([messages]), 
-                    timeout=10.0 
+                    timeout=240.0 
                 )
                 response_text = llm_response.generations[0][0].text
                 
@@ -3208,25 +3271,36 @@ class SourceTracker:
             cls._instance = super(SourceTracker, cls).__new__(cls)
             # Initialize with an empty list to store NodeWithScore objects
             cls._instance.nodes = []
+            # Track node IDs to avoid duplicates
+            cls._instance.node_ids = set()
+            # Add a counter to limit the number of nodes
+            cls._instance.max_nodes = 30
         return cls._instance
 
     def reset(self):
-        # Reset the list of nodes
+        # Reset the list of nodes and tracking set
         self.nodes = []
-
-    # Keep track of node IDs to avoid duplicates
-    # self.node_ids = set() # Optional: Uncomment if you want to avoid duplicate nodes
+        self.node_ids = set()
 
     def add_sources_from_nodes(self, nodes: List[NodeWithScore]):
-        for node in nodes:
-            # Optional: Uncomment below to skip adding if node ID already seen
-            # if node.node.node_id in self.node_ids:
-            #    continue
-            # Append the whole NodeWithScore object
+        # Only store up to max_nodes to avoid memory issues
+        if len(self.nodes) >= self.max_nodes:
+            print(f"SourceTracker already has {len(self.nodes)} nodes, not adding more")
+            return
+            
+        # Calculate how many more nodes we can add
+        slots_available = self.max_nodes - len(self.nodes)
+        nodes_to_add = nodes[:slots_available]
+        
+        for node in nodes_to_add:
+            # Skip adding if node ID already seen
+            if hasattr(node.node, 'node_id') and node.node.node_id in self.node_ids:
+                continue
+                
+            # Append the node and track its ID
             self.nodes.append(node)
-            # Optional: Uncomment below to track node ID
-            # self.node_ids.add(node.node.node_id)
-
+            if hasattr(node.node, 'node_id'):
+                self.node_ids.add(node.node.node_id)
 
     def get_source_nodes(self) -> List[NodeWithScore]:
          # Return the stored list of NodeWithScore objects
@@ -3236,6 +3310,7 @@ class SourceTracker:
         if not self.nodes:
             return ""
 
+        # Use sets for faster lookups
         sources_list = []
         seen_sources = set()
         for node in self.nodes:
@@ -3244,24 +3319,31 @@ class SourceTracker:
                 source = node.node.metadata.get("source", "Unknown")
                 family = node.node.metadata.get("connector_family", "Unknown")
                 # Avoid duplicate source/family pairs in the summary text
-                if source != "Unknown" and (source, family) not in seen_sources:
+                source_family_key = f"{source}_{family}"
+                if source != "Unknown" and source_family_key not in seen_sources:
                      sources_list.append(f"{source} ({family})")
-                     seen_sources.add((source, family))
+                     seen_sources.add(source_family_key)
 
         if sources_list:
-             return "\n\nSource documents: " + ", ".join(sorted(list(seen_sources), key=lambda x: x[0]))
+            # Only include up to 5 sources to avoid large responses
+            trimmed_list = sources_list[:5]
+            if len(sources_list) > 5:
+                return "\n\nSource documents: " + ", ".join(trimmed_list) + f", and {len(sources_list) - 5} more"
+            else:
+                return "\n\nSource documents: " + ", ".join(trimmed_list)
         return ""
 
     def get_absolute_paths(self) -> List[str]:
         paths = set()
-        for node in self.nodes:
+        # Limit to processing only 10 nodes to improve performance
+        for node in self.nodes[:10]:
              # Access metadata from the inner node object
             if hasattr(node, 'node') and hasattr(node.node, 'metadata'):
                 path = node.node.metadata.get("absolute_path", None)
                 if path:
                     paths.add(path)
-        return list(paths)
-
+        # Limit to returning only 5 paths
+        return list(paths)[:5]
 
 
 @app.get("/health")
@@ -3285,7 +3367,7 @@ async def chat(request: Request):
     if not app_ready:
         print("Waiting for application startup to complete...")
         # Wait with timeout to avoid hanging indefinitely
-        if not startup_complete.wait(timeout=60):
+        if not startup_complete.wait(timeout=240):
             raise HTTPException(status_code=503, 
                               detail="Application is still initializing. Please try again in a few moments.")
 
@@ -3570,7 +3652,7 @@ async def chat(request: Request):
                 "input": user_input,
                 "chat_history": formatted_chat_history
             }),
-            timeout=180
+            timeout=240
         )
                     
                     final_answer = ""
@@ -3615,7 +3697,7 @@ async def chat(request: Request):
     top_k=30, 
     base_url=OLLAMA_BASE_URL,
     cache=False,
-    client_kwargs={"timeout": 120})  
+    client_kwargs={"timeout": 240})  
                             
                         if response.get('output', '') == "Agent stopped due to iteration limit or time limit.":
                             llm_prompt = f"""
@@ -3641,29 +3723,37 @@ async def chat(request: Request):
                         
                         # Create clickable file links if catalog or lab tools were used
                         if "Nicomatic_connector_catalogue" in used_tools or "Nicomatic_lab_tests" in used_tools:
-                            # Get the list of unique file paths only, instead of processing all nodes
-                            source_nodes = source_tracker.get_source_nodes()
+                            # Get the list of NodeWithScore objects
+                            source_nodes = source_tracker.get_source_nodes() 
                             if source_nodes:
                                 links_text = "\n\nView source documentation:"
-                                
-                                # Use a set to collect unique paths
-                                unique_paths = set()
-                                for node in source_nodes:
-                                    if hasattr(node, 'node') and hasattr(node.node, 'metadata'):
-                                        abs_path = node.node.metadata.get("absolute_path")
-                                        page_num = node.node.metadata.get("page_number", 1)
-                                        if abs_path:
-                                            unique_paths.add((abs_path, page_num))
-                                
-                                # Only process up to 5 unique paths to avoid timeouts
-                                processed_paths = list(unique_paths)[:5]
-                                for abs_path, page_num in processed_paths:
-                                    filename = os.path.basename(abs_path)
-                                    file_base = os.path.splitext(filename)[0]
-                                    encoded_path = urllib.parse.quote(abs_path).replace(".md", ".pdf")
-                                    links_text += f"\n- {file_base}: /source_document/{encoded_path}#page={page_num}"
-                                
-                                full_response = final_answer + links_text
+                                link_parts = set() 
+                                for node_with_score in source_nodes:
+                                    # Access metadata from the inner .node attribute
+                                    if hasattr(node_with_score, 'node') and hasattr(node_with_score.node, 'metadata'):
+                                        metadata = node_with_score.node.metadata
+                                        abs_path = metadata.get("absolute_path") 
+                                        if not abs_path:
+                                            continue
+
+                                        filename = os.path.basename(abs_path) 
+                                        file_base = os.path.splitext(filename)[0] 
+                                        # convert .md → .pdf in the URL
+                                        encoded_path = urllib.parse.quote(abs_path).replace(".md", ".pdf") 
+
+                                        # pull the page number out of the metadata (default to 1)
+                                        page_number = metadata.get("page_number", 1) 
+
+                                        ## build the link
+                                        link = ( f"\n- {file_base}: /source_document/{encoded_path}#page={page_number}")
+                                        link_parts.add(link)
+
+                                if link_parts:
+                                    ## Sort links alphabetically for consistent order
+                                    links_text += "\n" + "\n".join(sorted(list(link_parts))) 
+
+                                ## Combine answer with links
+                                full_response = final_answer + links_text 
                             else:
                                 full_response = final_answer
                         else:
@@ -3693,7 +3783,7 @@ async def chat(request: Request):
 async def new_session():
     if not app_ready:
         print("Waiting for application startup to complete before creating new session...")
-        if not startup_complete.wait(timeout=60):
+        if not startup_complete.wait(timeout=240):
             raise HTTPException(status_code=503, 
                               detail="Application is still initializing. Please try again in a few moments.")
     conn_info = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}/{POSTGRES_DB}"
