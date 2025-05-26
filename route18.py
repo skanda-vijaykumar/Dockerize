@@ -892,7 +892,16 @@ def creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_m
     return tools
 # Create an isolated agent with its own LLM instance
 def create_isolated_agent(tools):
-    llm = ChatOllama( model="llama3.1", temperature=0.0, num_ctx=8152, cache=False, client_kwargs={"timeout": 60}, base_url=OLLAMA_BASE_URL,client_id=f"agent-{uuid.uuid4()}")
+    llm = ChatOllama(
+    model="llama3.1", 
+    temperature=0.0, 
+    disable_streaming=False,
+    num_ctx=8152, 
+    top_p=0.7, 
+    top_k=30, 
+    base_url=OLLAMA_BASE_URL,
+    cache=False,
+    client_kwargs={"timeout": 120})    
     prompt = hub.pull("intern/ask10")
     agent = create_react_agent(llm=llm, tools=tools, prompt=prompt)
     agent_executer = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True, max_iterations=2, max_execution_time=None, 
@@ -962,7 +971,16 @@ def normalize_awg_value(awg_value):
 class LLMConnectorSelector:
     def __init__(self):
         ## Chatmodel
-        self.llm = ChatOllama(model="llama3.1",cache=False,base_url=OLLAMA_BASE_URL)
+        self.llm = ChatOllama(
+    model="llama3.1", 
+    temperature=0.0, 
+    disable_streaming=False,
+    num_ctx=8152, 
+    top_p=0.7, 
+    top_k=30, 
+    base_url=OLLAMA_BASE_URL,
+    cache=False,
+    client_kwargs={"timeout": 120})  
         ## Structure for the LLM response
         self.response_schemas = [ResponseSchema(name="value", description="The parsed value from user response"),ResponseSchema(name="confidence", description="Confidence score between 0 and 1"),
                                   ResponseSchema(name="reasoning", description="Explanation of the parsing logic")]
@@ -3317,74 +3335,74 @@ async def chat(request: Request):
         agent_with_chat_history = await get_agent(tools)
         session_history.add_message(HumanMessage(content=user_input))
 
-    #     llm = ChatOllama(model="llama3.1", temperature=0.0, num_ctx=8152, cache=False, format="json")
+        llm = ChatOllama(model="llama3.1",base_url=OLLAMA_BASE_URL, temperature=0.0, num_ctx=8152, cache=False, format="json")
         
-    #     print("Routing your query now")
-    #     ## Routing query to either general or selection
-    #     prompt = PromptTemplate(
-    # template=
-    # """
-    # <|begin_of_text|><|start_header_id|>system<|end_header_id|>
+        print("Routing your query now")
+        ## Routing query to either general or selection
+        prompt = PromptTemplate(
+    template=
+    """
+    <|begin_of_text|><|start_header_id|>system<|end_header_id|>
 
-    # You are a precise query routing AI. Your job is to analyze the conversation CONTEXT (`history`) and the user's INTENT in their latest input (`question`) to correctly route the query to either the 'selection' or 'general' channel.
+    You are a precise query routing AI. Your job is to analyze the conversation CONTEXT (`history`) and the user's INTENT in their latest input (`question`) to correctly route the query to either the 'selection' or 'general' channel.
 
-    # ### [Routing Channels:]
+    ### [Routing Channels:]
 
-    # 1.  **selection**:
-    #     Route here ONLY when the user's primary goal is **discovering or narrowing down the *type* of connector needed** based on requirements, **AND they have NOT mentioned a specific connector family (AMM, CMM, DMM, EMM) in their current input.** This includes when the user is:
-    #     - Starting a search without a specific product line in mind (e.g., "I need a connector", "Help me find a connector for high power and signal").
-    #     - Actively providing specifications or constraints ***specifically in response to a system question aimed at finding a suitable connector TYPE*** during an active selection process. Examples of such responses include values like "1.27mm", "20 pins", "metal housing", "EMI shielding required", "on board", "pcb to cable", "100 degrees C", "as small as possible", "no preference", "yes [to a selection question]", "I don't know".
-    #     - Asking clarifying questions *about the selection process itself* or about a specification the system asked for, *while actively engaged in the selection flow* (e.g., "What does pitch size mean here?", "What temperature ranges are typical?", "What do you mean by operational current?", "Can you explain the housing options?").
+    1.  **selection**:
+        Route here ONLY when the user's primary goal is **discovering or narrowing down the *type* of connector needed** based on requirements, **AND they have NOT mentioned a specific connector family (AMM, CMM, DMM, EMM) in their current input.** This includes when the user is:
+        - Starting a search without a specific product line in mind (e.g., "I need a connector", "Help me find a connector for high power and signal").
+        - Actively providing specifications or constraints ***specifically in response to a system question aimed at finding a suitable connector TYPE*** during an active selection process. Examples of such responses include values like "1.27mm", "20 pins", "metal housing", "EMI shielding required", "on board", "pcb to cable", "100 degrees C", "as small as possible", "no preference", "yes [to a selection question]", "I don't know".
+        - Asking clarifying questions *about the selection process itself* or about a specification the system asked for, *while actively engaged in the selection flow* (e.g., "What does pitch size mean here?", "What temperature ranges are typical?", "What do you mean by operational current?", "Can you explain the housing options?").
 
-    # 2.  **general**:
-    #     Route here when the user's query **mentions a specific, named connector family (AMM, CMM, DMM, EMM)**, OR when they are seeking general information, definitions, discussing past recommendations, or providing conversational input not directly part of active selection. This includes:
-    #     - **ABSOLUTE PRIORITY TRIGGER:** User input contains "AMM", "CMM", "DMM", or "EMM". **Route here REGARDLESS of context or any other words like 'need', 'require', or specifications mentioned.** This rule overrides ALL other signals.
-    #         - **Examples:** "I need a DMM with 100 pins.", "Tell me about high-temp CMM options.", "What is the current rating for AMM?", "Compare DMM and CMM.", "Okay, what about the DMM?", "Information on EMM needed."
-    #     - Seeking general information, definitions, or explanations about connectors or related concepts ***outside*** of an active system-led selection process OR when the question is *about* a specific named family (AMM, CMM, DMM, EMM). (e.g., "What is EMI shielding?", "Explain connector pitch.", "What's the standard pitch for DMM?").
-    #     - Queries that commonly use WH-questions (What, Where, Why, How) or end in '?', asking for information rather than defining selection criteria. ***Crucially:*** A clarifying question *during* active `selection` (System: 'What pitch?', User: 'What does pitch mean?') stays in `selection`. A general knowledge question ("What is pitch?") goes to `general`.
-    #     - Queries related to cables associated with connectors.
-    #     - **Greetings, expressions of appreciation, or simple conversational filler** (e.g., "hello", "hi", "thanks", "thank you", "ok", "got it", "sounds good"). Route these directly to `general`.
-    #     - Questions about connectors *previously recommended* by the system (e.g., "What's the lead time for that CMM you suggested?", "Tell me more about the DMM option.").
+    2.  **general**:
+        Route here when the user's query **mentions a specific, named connector family (AMM, CMM, DMM, EMM)**, OR when they are seeking general information, definitions, discussing past recommendations, or providing conversational input not directly part of active selection. This includes:
+        - **ABSOLUTE PRIORITY TRIGGER:** User input contains "AMM", "CMM", "DMM", or "EMM". **Route here REGARDLESS of context or any other words like 'need', 'require', or specifications mentioned.** This rule overrides ALL other signals.
+            - **Examples:** "I need a DMM with 100 pins.", "Tell me about high-temp CMM options.", "What is the current rating for AMM?", "Compare DMM and CMM.", "Okay, what about the DMM?", "Information on EMM needed."
+        - Seeking general information, definitions, or explanations about connectors or related concepts ***outside*** of an active system-led selection process OR when the question is *about* a specific named family (AMM, CMM, DMM, EMM). (e.g., "What is EMI shielding?", "Explain connector pitch.", "What's the standard pitch for DMM?").
+        - Queries that commonly use WH-questions (What, Where, Why, How) or end in '?', asking for information rather than defining selection criteria. ***Crucially:*** A clarifying question *during* active `selection` (System: 'What pitch?', User: 'What does pitch mean?') stays in `selection`. A general knowledge question ("What is pitch?") goes to `general`.
+        - Queries related to cables associated with connectors.
+        - **Greetings, expressions of appreciation, or simple conversational filler** (e.g., "hello", "hi", "thanks", "thank you", "ok", "got it", "sounds good"). Route these directly to `general`.
+        - Questions about connectors *previously recommended* by the system (e.g., "What's the lead time for that CMM you suggested?", "Tell me more about the DMM option.").
 
-    # ### [Core Guidelines:]
+    ### [Core Guidelines:]
 
-    # 1.  **SPECIFIC NAME PRECEDENCE (MOST IMPORTANT RULE):** If the user's latest input contains "AMM", "CMM", "DMM", or "EMM", the query **MUST** be routed to **general**. This rule takes absolute precedence over context, intent keywords (like 'need', 'looking for'), or the presence of specifications (like '100 pins', 'high temp').
-    # 2.  **ACTIVE SELECTION CONTEXT OVERRIDES KEYWORDS:** If the `history` shows the system just asked a question to narrow down the connector *type* (e.g., asking about pins, pitch, temp, housing, shielding, mounting, connection type), the user's *direct answer* to that question **MUST** be routed to **selection**, UNLESS the answer itself contains 'AMM', 'CMM', 'DMM', or 'EMM' (Rule 1 applies). Do *not* route to `general` just because the answer contains words like 'need', 'require', 'information', or technical terms (like 'EMI shielding') if it's clearly answering a selection question in context.
-    # 3.  **CONTEXT IS KING (Beyond Rule 2):** Analyze the full `history`. A user response like "100 degrees" is `selection` if the system just asked about temperature *during selection*. It's `general` if discussing a specific DMM's specs or asking a general knowledge question unrelated to active selection.
-    # 4.  **INTENT MATTERS (Secondary to Name Precedence & Context):**
-    #     - **Selection Intent:** User is trying to *figure out which type* of connector fits their abstract needs, *without having a specific family in mind*, and is actively participating in the system-led discovery process.
-    #     - **General Intent:** User is asking *about* a known connector type/concept, providing conversational filler, or continuing a non-selection discussion.
-    # 5.  **POST-RECOMMENDATION QUESTIONS (CRITICAL RULE):** Once the system has suggested a specific connector type or family (e.g., 'Based on your needs, a CMM connector seems suitable.'), any subsequent user questions asking *about the features, capabilities, or specifics of that suggested connector* (even if referred to as 'it' or 'that one') **MUST** go to **general**. Examples: 'What's the lead time for that CMM?', 'Can it handle 150 degrees?', 'Is it available in a right-angle version?', **'Can I mount it on a panel?'**. Route to `selection` again only if the user explicitly rejects the suggestion and wants to restart the search OR modifies their core requirements significantly.
-    # 6.  **AMBIGUITY & CLARIFICATION:**
-    #     - Vague answers ("yes", "ok", "I don't know", "no preference") during `selection` stay in `selection` as they are responses within that flow.
-    #     - User questions ("what do you mean?", "?", "what is X?") should be routed based on context: if clarifying a `selection` question -> `selection`; if asking for general info or about a specific family -> `general`.
+    1.  **SPECIFIC NAME PRECEDENCE (MOST IMPORTANT RULE):** If the user's latest input contains "AMM", "CMM", "DMM", or "EMM", the query **MUST** be routed to **general**. This rule takes absolute precedence over context, intent keywords (like 'need', 'looking for'), or the presence of specifications (like '100 pins', 'high temp').
+    2.  **ACTIVE SELECTION CONTEXT OVERRIDES KEYWORDS:** If the `history` shows the system just asked a question to narrow down the connector *type* (e.g., asking about pins, pitch, temp, housing, shielding, mounting, connection type), the user's *direct answer* to that question **MUST** be routed to **selection**, UNLESS the answer itself contains 'AMM', 'CMM', 'DMM', or 'EMM' (Rule 1 applies). Do *not* route to `general` just because the answer contains words like 'need', 'require', 'information', or technical terms (like 'EMI shielding') if it's clearly answering a selection question in context.
+    3.  **CONTEXT IS KING (Beyond Rule 2):** Analyze the full `history`. A user response like "100 degrees" is `selection` if the system just asked about temperature *during selection*. It's `general` if discussing a specific DMM's specs or asking a general knowledge question unrelated to active selection.
+    4.  **INTENT MATTERS (Secondary to Name Precedence & Context):**
+        - **Selection Intent:** User is trying to *figure out which type* of connector fits their abstract needs, *without having a specific family in mind*, and is actively participating in the system-led discovery process.
+        - **General Intent:** User is asking *about* a known connector type/concept, providing conversational filler, or continuing a non-selection discussion.
+    5.  **POST-RECOMMENDATION QUESTIONS (CRITICAL RULE):** Once the system has suggested a specific connector type or family (e.g., 'Based on your needs, a CMM connector seems suitable.'), any subsequent user questions asking *about the features, capabilities, or specifics of that suggested connector* (even if referred to as 'it' or 'that one') **MUST** go to **general**. Examples: 'What's the lead time for that CMM?', 'Can it handle 150 degrees?', 'Is it available in a right-angle version?', **'Can I mount it on a panel?'**. Route to `selection` again only if the user explicitly rejects the suggestion and wants to restart the search OR modifies their core requirements significantly.
+    6.  **AMBIGUITY & CLARIFICATION:**
+        - Vague answers ("yes", "ok", "I don't know", "no preference") during `selection` stay in `selection` as they are responses within that flow.
+        - User questions ("what do you mean?", "?", "what is X?") should be routed based on context: if clarifying a `selection` question -> `selection`; if asking for general info or about a specific family -> `general`.
 
-    # ### [Output:]
+    ### [Output:]
 
-    # Provide your routing decision as a JSON response with a single key `'score'`. The value must be exactly `"general"` or `"selection"`.
-    # **Output *only* the raw JSON object.** No other text, comments, explanations, or markdown formatting are allowed.
+    Provide your routing decision as a JSON response with a single key `'score'`. The value must be exactly `"general"` or `"selection"`.
+    **Output *only* the raw JSON object.** No other text, comments, explanations, or markdown formatting are allowed.
 
-    # Example valid outputs:
-    # {{'score': 'selection'}}
-    # {{'score': 'general'}}
+    Example valid outputs:
+    {{'score': 'selection'}}
+    {{'score': 'general'}}
 
-    # <|eot_id|><|start_header_id|>user<|end_header_id|>
-    # Here is the conversation history: \n\n {history} \n\n
-    # Here is the human input: {question}
+    <|eot_id|><|start_header_id|>user<|end_header_id|>
+    Here is the conversation history: \n\n {history} \n\n
+    Here is the human input: {question}
 
-    # <|eot_id|><|start_header_id|>assistant<|end_header_id|>
-    # """,
-    # input_variables=["question", "history"])
+    <|eot_id|><|start_header_id|>assistant<|end_header_id|>
+    """,
+    input_variables=["question", "history"])
 
-    #     retrieval_grader = prompt | llm | JsonOutputParser()
+        retrieval_grader = prompt | llm | JsonOutputParser()
         
-    #     pre_processed_route = pre_process_routing(user_input, formatted_chat_history)
-    #     if pre_processed_route is not None:
-    #         routing_result = pre_processed_route
-    #     else:
-    #         # Proceed with LLM-based routing
-    #         routing_result = retrieval_grader.invoke({"question": user_input, "history": formatted_chat_history})
-        routing_result={"score":"general"}
+        pre_processed_route = pre_process_routing(user_input, formatted_chat_history)
+        if pre_processed_route is not None:
+            routing_result = pre_processed_route
+        else:
+            # Proceed with LLM-based routing
+            routing_result = retrieval_grader.invoke({"question": user_input, "history": formatted_chat_history})
+        # routing_result={"score":"general"}
         print(routing_result)
         if not isinstance(routing_result, dict) or 'score' not in routing_result:
             ## Fallback to general routing if response is invalid
@@ -3547,10 +3565,13 @@ async def chat(request: Request):
                     source_tracker = SourceTracker()
                     source_tracker.reset()
                     
-                    response = await agent_with_chat_history.ainvoke({
+                    response = await asyncio.wait_for(
+            agent_with_chat_history.ainvoke({
                 "input": user_input,
                 "chat_history": formatted_chat_history
-            })
+            }),
+            timeout=180
+        )
                     
                     final_answer = ""
                     intermediate_data = []
@@ -3585,8 +3606,16 @@ async def chat(request: Request):
                         # print("=== END OF AGENT STEPS ===\n")
                         
                         # Generate response
-                        llm = ChatOllama(model="llama3.1", temperature=0.0, disable_streaming=False, 
-                            num_ctx=8152, top_p=0.7, top_k=30, base_url=OLLAMA_BASE_URL,cache=False)
+                        llm = ChatOllama(
+    model="llama3.1", 
+    temperature=0.0, 
+    disable_streaming=False,
+    num_ctx=8152, 
+    top_p=0.7, 
+    top_k=30, 
+    base_url=OLLAMA_BASE_URL,
+    cache=False,
+    client_kwargs={"timeout": 120})  
                             
                         if response.get('output', '') == "Agent stopped due to iteration limit or time limit.":
                             llm_prompt = f"""
@@ -3612,37 +3641,29 @@ async def chat(request: Request):
                         
                         # Create clickable file links if catalog or lab tools were used
                         if "Nicomatic_connector_catalogue" in used_tools or "Nicomatic_lab_tests" in used_tools:
-                            # Get the list of NodeWithScore objects
-                            source_nodes = source_tracker.get_source_nodes() 
+                            # Get the list of unique file paths only, instead of processing all nodes
+                            source_nodes = source_tracker.get_source_nodes()
                             if source_nodes:
                                 links_text = "\n\nView source documentation:"
-                                link_parts = set() 
-                                for node_with_score in source_nodes:
-                                    # Access metadata from the inner .node attribute
-                                    if hasattr(node_with_score, 'node') and hasattr(node_with_score.node, 'metadata'):
-                                        metadata = node_with_score.node.metadata
-                                        abs_path = metadata.get("absolute_path") 
-                                        if not abs_path:
-                                            continue
-
-                                        filename = os.path.basename(abs_path) 
-                                        file_base = os.path.splitext(filename)[0] 
-                                        # convert .md → .pdf in the URL
-                                        encoded_path = urllib.parse.quote(abs_path).replace(".md", ".pdf") 
-
-                                        # pull the page number out of the metadata (default to 1)
-                                        page_number = metadata.get("page_number", 1) 
-
-                                        ## build the link
-                                        link = ( f"\n- {file_base}: /source_document/{encoded_path}#page={page_number}")
-                                        link_parts.add(link)
-
-                                if link_parts:
-                                    ## Sort links alphabetically for consistent order
-                                    links_text += "\n" + "\n".join(sorted(list(link_parts))) 
-
-                                ## Combine answer with links
-                                full_response = final_answer + links_text 
+                                
+                                # Use a set to collect unique paths
+                                unique_paths = set()
+                                for node in source_nodes:
+                                    if hasattr(node, 'node') and hasattr(node.node, 'metadata'):
+                                        abs_path = node.node.metadata.get("absolute_path")
+                                        page_num = node.node.metadata.get("page_number", 1)
+                                        if abs_path:
+                                            unique_paths.add((abs_path, page_num))
+                                
+                                # Only process up to 5 unique paths to avoid timeouts
+                                processed_paths = list(unique_paths)[:5]
+                                for abs_path, page_num in processed_paths:
+                                    filename = os.path.basename(abs_path)
+                                    file_base = os.path.splitext(filename)[0]
+                                    encoded_path = urllib.parse.quote(abs_path).replace(".md", ".pdf")
+                                    links_text += f"\n- {file_base}: /source_document/{encoded_path}#page={page_num}"
+                                
+                                full_response = final_answer + links_text
                             else:
                                 full_response = final_answer
                         else:
