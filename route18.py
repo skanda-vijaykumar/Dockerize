@@ -3720,7 +3720,7 @@ async def chat(request: Request):
 
                         ## Clean up final answer
                         final_answer = final_answer.replace("Final Answer:", "").strip()
-                        
+                    
                         # Create clickable file links if catalog or lab tools were used
                         if "Nicomatic_connector_catalogue" in used_tools or "Nicomatic_lab_tests" in used_tools:
                             # Get the list of NodeWithScore objects
@@ -3738,21 +3738,23 @@ async def chat(request: Request):
 
                                         filename = os.path.basename(abs_path) 
                                         file_base = os.path.splitext(filename)[0] 
-                                        # convert .md → .pdf in the URL
-                                        encoded_path = urllib.parse.quote(abs_path).replace(".md", ".pdf") 
-
-                                        # pull the page number out of the metadata (default to 1)
+                                        
+                                        # Properly encode the path for URL
+                                        # Don't replace .md with .pdf here, let the endpoint handle file type
+                                        encoded_path = urllib.parse.quote(abs_path, safe='/').replace(".md", ".pdf") 
+                                        
+                                        # Pull the page number out of the metadata (default to 1)
                                         page_number = metadata.get("page_number", 1) 
 
-                                        ## build the link
-                                        link = ( f"\n- {file_base}: /source_document/{encoded_path}#page={page_number}")
+                                        # Build the link with proper formatting
+                                        link = f"\n- {file_base} (Page {page_number}): /source_document/{encoded_path}#page={page_number}"
                                         link_parts.add(link)
 
                                 if link_parts:
-                                    ## Sort links alphabetically for consistent order
+                                    # Sort links alphabetically for consistent order
                                     links_text += "\n" + "\n".join(sorted(list(link_parts))) 
 
-                                ## Combine answer with links
+                                # Combine answer with links
                                 full_response = final_answer + links_text 
                             else:
                                 full_response = final_answer
@@ -3970,92 +3972,163 @@ async def get_source_document(file_path: str, page: int = 1):
         # Decode the file path
         decoded_path = urllib.parse.unquote(file_path)
         print(f"Requested document path: {decoded_path}")
-        # Check if the file exists
-        if not os.path.exists(decoded_path):
-            # Try alternative paths
-            
-            # 1. Try with base filename in extracted_best directory
-            base_filename = os.path.basename(decoded_path)
-            alt_path1 = os.path.join("./extracted_best", base_filename)
-            
-            # 2. Try with base filename in lab directory
-            alt_path2 = os.path.join("./extracted_best/lab", base_filename)
-            
-            # 3. Try absolute path within Docker container
-            container_path = os.path.join("/app/extracted_best", base_filename)
-            
-            # 4. Try replacing app path with local path
-            local_path = decoded_path.replace("/app/", "./")
-            
-            # Check all alternatives
-            possible_paths = [alt_path1, alt_path2, container_path, local_path]
-            
-            found = False
-            for path in possible_paths:
-                if os.path.exists(path):
-                    decoded_path = path
-                    found = True
-                    print(f"Found document at: {decoded_path}")
-                    break
-            
-            if not found:
-                print(f"Document not found at any of these paths: {possible_paths}")
-                raise HTTPException(status_code=404, detail="Source document not found")
+        
+        # Normalize the path - remove any duplicate slashes
+        decoded_path = os.path.normpath(decoded_path)
+        
+        # Security check - prevent directory traversal
+        if '..' in decoded_path or decoded_path.startswith('/'):
+            # If it's an absolute path, try to make it relative to our data directories
+            if decoded_path.startswith('/app/extracted_best/'):
+                # Docker container path
+                relative_path = decoded_path.replace('/app/extracted_best/', '')
+                decoded_path = os.path.join('./extracted_best/', relative_path)
+            elif decoded_path.startswith('/'):
+                # Other absolute paths - extract just the filename
+                decoded_path = os.path.basename(decoded_path)
+        
+        # List of possible locations to search for the file
+        search_paths = []
+        
+        # If it's already a valid path, try it first
+        if os.path.exists(decoded_path):
+            search_paths.append(decoded_path)
+        
+        # Extract just the filename for fallback searches
+        filename = os.path.basename(decoded_path)
+        
+        # Add search locations
+        search_paths.extend([
+            os.path.join("./extracted_best", filename),
+            os.path.join("./extracted_best/lab", filename),
+            os.path.join("/app/extracted_best", filename),
+            os.path.join("/app/extracted_best/lab", filename)
+        ])
+        
+        # Try to find the file
+        found_path = None
+        for search_path in search_paths:
+            if os.path.exists(search_path):
+                found_path = search_path
+                print(f"Found document at: {found_path}")
+                break
+        
+        if not found_path:
+            print(f"Document not found. Searched in: {search_paths}")
+            raise HTTPException(status_code=404, detail=f"Source document '{filename}' not found")
 
-        # Continue with serving the file
-        _, ext = os.path.splitext(decoded_path)
+        # Determine file type
+        _, ext = os.path.splitext(found_path)
         ext = ext.lower()
 
         if ext == ".pdf":
-            # Serve the PDF with a page hint
-            response = FileResponse(decoded_path, media_type="application/pdf")
-            response.headers["Content-Disposition"] = f"inline; filename={os.path.basename(decoded_path)}"
+            # Serve PDF files directly
+            response = FileResponse(found_path, media_type="application/pdf")
+            response.headers["Content-Disposition"] = f"inline; filename={os.path.basename(found_path)}"
             return response
         else:
+            # For text files (like .md), serve as HTML with proper formatting
             try:
-                with open(decoded_path, "r", encoding="utf-8") as file: 
-                    content = file.read() 
+                with open(found_path, "r", encoding="utf-8") as file: 
+                    content = file.read()
             except UnicodeDecodeError:
-                 try:
-                     with open(decoded_path, "r", encoding="latin-1") as file:
-                         content = file.read()
-                 except Exception:
-                    # If reading as text fails completely, consider serving as plain text or raising error
-                    raise HTTPException(status_code=500, detail=f"Error reading file content with standard encodings.")
+                try:
+                    with open(found_path, "r", encoding="latin-1") as file:
+                        content = file.read()
+                except Exception as e:
+                    raise HTTPException(status_code=500, detail=f"Error reading file: {str(e)}")
 
-
-            filename = os.path.basename(decoded_path) #
-
+            filename_display= os.path.basename(found_path)
+            if ext == ".md":
+                # Simple markdown-like formatting
+                content = content.replace('\n#', '\n<h1>').replace('\n##', '\n<h2>').replace('\n###', '\n<h3>')
+                content = content.replace('**', '<strong>').replace('**', '</strong>')
+                content = content.replace('*', '<em>').replace('*', '</em>')
             # Serve the text content as HTML
             html_content = f"""
             <!DOCTYPE html>
             <html>
             <head> 
-                <title>Source Document: {filename}</title> 
+                <title>Source Document: {filename_display}</title> 
+                <meta charset="utf-8">
                 <style> 
-                    body {{ font-family: Arial, sans-serif; line-height: 1.6; padding: 20px; max-width: 900px; margin: 0 auto; }} 
-                    pre {{ background-color: #f5f5f5; padding: 15px; border-radius: 5px; overflow-x: auto; white-space: pre-wrap; word-wrap: break-word; }}
-                    h1 {{ color: #333; border-bottom: 1px solid #eee; padding-bottom: 10px; }} 
-                    .filepath {{ color: #666; font-size: 0.9em; margin-bottom: 20px; }} 
+                    body {{ 
+                        font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; 
+                        line-height: 1.6; 
+                        padding: 20px; 
+                        max-width: 1000px; 
+                        margin: 0 auto; 
+                        background-color: #f8f9fa; 
+                    }} 
+                    .container {{
+                        background-color: white;
+                        padding: 30px;
+                        border-radius: 8px;
+                        box-shadow: 0 2px 10px rgba(0,0,0,0.1);
+                    }}
+                    pre {{ 
+                        background-color: #f5f5f5; 
+                        padding: 15px; 
+                        border-radius: 5px; 
+                        overflow-x: auto; 
+                        white-space: pre-wrap; 
+                        word-wrap: break-word; 
+                        font-family: 'Courier New', monospace;
+                        border-left: 4px solid #007bff;
+                    }}
+                    h1 {{ 
+                        color: #333; 
+                        border-bottom: 2px solid #007bff; 
+                        padding-bottom: 10px; 
+                        margin-bottom: 20px;
+                    }} 
+                    h2, h3 {{ color: #555; margin-top: 25px; }}
+                    .filepath {{ 
+                        color: #666; 
+                        font-size: 0.9em; 
+                        margin-bottom: 20px; 
+                        padding: 10px;
+                        background-color: #e9ecef;
+                        border-radius: 4px;
+                    }} 
+                    .page-info {{
+                        color: #007bff;
+                        font-weight: bold;
+                        margin-bottom: 15px;
+                    }}
+                    table {{
+                        border-collapse: collapse;
+                        width: 100%;
+                        margin: 15px 0;
+                    }}
+                    th, td {{
+                        border: 1px solid #ddd;
+                        padding: 8px;
+                        text-align: left;
+                    }}
+                    th {{
+                        background-color: #f2f2f2;
+                    }}
                 </style> 
             </head> 
             <body> 
-                <h1>Source Document: {filename}</h1> 
-                <div class="filepath">Full path: {decoded_path}</div> 
-                <pre>{content}</pre> 
+                <div class="container">
+                    <h1>📄 Source Document: {filename_display}</h1> 
+                    <div class="filepath">📁 Location: {found_path}</div>
+                    {f'<div class="page-info">📖 Page: {page}</div>' if page > 1 else ''}
+                    <pre>{content}</pre>
+                </div>
             </body> 
             </html>
             """ 
             return HTMLResponse(content=html_content) 
 
-    except FileNotFoundError: 
-        raise HTTPException(status_code=404, detail="Source document not found")
-    except HTTPException as he: # Re-raise specific HTTP exceptions
+    except HTTPException as he:
         raise he
     except Exception as e: 
-        # Log the detailed error for debugging
-        logging.error(f"Error reading source document '{decoded_path}': {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Error reading source document: {str(e)}") #
+        logging.error(f"Error serving source document '{file_path}': {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Error serving source document: {str(e)}")
+    
     ## Run FastAPI with uvicorn
 if __name__ == '__main__':
     uvicorn.run(app, host="0.0.0.0", port=8000, log_level="info")
