@@ -21,7 +21,6 @@ COPY *.py ./
 COPY static/ ./static/
 COPY templates/ ./templates/
 COPY extracted_best/ ./extracted_best/
-COPY reranker_patch.py ./
 
 # Create directories if they don't exist
 RUN mkdir -p static/js
