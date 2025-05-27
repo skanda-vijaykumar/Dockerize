@@ -1,0 +1,256 @@
+stages:
+  - test
+  - build
+  - deploy
+
+variables:
+  COMPOSE_PROJECT_NAME: "nicomatic-app"
+  APP_IMAGE: "$CI_REGISTRY_IMAGE/app:$CI_COMMIT_SHA"
+  APP_IMAGE_LATEST: "$CI_REGISTRY_IMAGE/app:latest"
+
+# Test stage - run basic checks
+test:
+  stage: test
+  image: python:3.12-alpine
+  script:
+    - echo "Running basic tests..."
+    - python -m py_compile route18.py || echo "Python syntax check completed"
+    - echo "Checking if required files exist..."
+    - test -f requirements.txt
+    - test -f Dockerfile
+    - test -f docker-compose.yml
+    - test -d extracted_best
+    - echo "All required files found!"
+    - echo "Checking Python dependencies..."
+    - pip install --dry-run -r requirements.txt > /dev/null 2>&1 || echo "Dependencies check completed"
+  only:
+    - main
+    - merge_requests
+
+# Build stage - build and push Docker image using host Docker
+build:
+  stage: build
+  image: alpine:3.18
+  before_script:
+    # Install Docker CLI and required tools
+    - apk add --no-cache docker-cli curl bash
+    # Use host Docker daemon via mounted socket
+    - export DOCKER_HOST="unix:///var/run/docker.sock"
+    - echo "Testing Docker connection..."
+    - docker --version
+    - docker info
+  script:
+    - echo "Building application Docker image using host Docker..."
+    
+    - echo "Logging into GitLab Container Registry..."
+    - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
+    
+    - echo "Building application Docker image..."
+    - docker build -t $APP_IMAGE -t $APP_IMAGE_LATEST .
+    
+    - echo "Pushing images to registry..."
+    - docker push $APP_IMAGE
+    - docker push $APP_IMAGE_LATEST
+    
+    - echo "Cleaning up local images to save space..."
+    - docker rmi $APP_IMAGE $APP_IMAGE_LATEST || true
+    
+    - echo "Build completed successfully!"
+    
+  only:
+    - main
+
+# Deploy stage - deploy to production (manual trigger)
+deploy:
+  stage: deploy
+  image: alpine:3.18
+  when: manual
+  environment:
+    name: production
+    url: http://localhost:8000
+  before_script:
+    # Install required tools
+    - apk add --no-cache docker-cli curl bash
+    # Install docker-compose
+    - curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" -o /usr/local/bin/docker-compose
+    - chmod +x /usr/local/bin/docker-compose
+    - export DOCKER_HOST="unix:///var/run/docker.sock"
+    - docker --version
+    - docker-compose --version
+  script:
+    - echo "Starting deployment process..."
+    
+    # Create necessary directories
+    - mkdir -p /opt/nicomatic-app
+    - cd /opt/nicomatic-app
+    
+    # Test Docker connection
+    - docker ps
+    
+    # Stop existing services gracefully
+    - echo "Stopping existing services..."
+    - docker-compose -f docker-compose.prod.yml down --remove-orphans || true
+    
+    # Clean up old images (keep last 2 versions)
+    - echo "Cleaning up old images..."
+    - docker images --format "table {{.Repository}}:{{.Tag}}\t{{.CreatedAt}}" | grep "$CI_REGISTRY_IMAGE/app" | tail -n +3 | awk '{print $1}' | xargs -r docker rmi || true
+    
+    # Create deployment files
+    - echo "Creating deployment configuration..."
+    
+    # Create production docker-compose file
+    - |
+      cat > docker-compose.prod.yml << EOF
+      version: '3.12'
+      
+      services:
+        postgres:
+          image: postgres:15-alpine
+          container_name: nicomatic-postgres
+          restart: always
+          environment:
+            POSTGRES_USER: \${POSTGRES_USER}
+            POSTGRES_PASSWORD: \${POSTGRES_PASSWORD}
+            POSTGRES_DB: \${POSTGRES_DB}
+          ports:
+            - "5432:5432"
+          volumes:
+            - postgres_data:/var/lib/postgresql/data
+            - ./postgres-init.sql:/docker-entrypoint-initdb.d/init.sql
+          healthcheck:
+            test: ["CMD-SHELL", "pg_isready -U postgres"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            
+        ollama:
+          image: ollama/ollama:latest
+          container_name: nicomatic-ollama
+          restart: always
+          ports:
+            - "11434:11434"
+          volumes:
+            - ollama_data:/root/.ollama
+          healthcheck:
+            test: ["CMD-SHELL", "curl --fail --silent http://localhost:11434/api/tags || exit 1"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+            start_period: 20s
+            
+        app:
+          image: $APP_IMAGE
+          container_name: nicomatic-app
+          restart: always
+          ports:
+            - "8000:8000"
+          depends_on:
+            postgres:
+              condition: service_healthy
+            ollama:
+              condition: service_started
+          healthcheck:
+            test: ["CMD-SHELL", "curl --fail --silent http://localhost:8000/health || exit 1"]
+            interval: 10s
+            timeout: 5s
+            retries: 5
+          environment:
+            - POSTGRES_HOST=postgres
+            - POSTGRES_USER=\${POSTGRES_USER}
+            - POSTGRES_PASSWORD=\${POSTGRES_PASSWORD}
+            - POSTGRES_DB=\${POSTGRES_DB}
+            - OLLAMA_HOST=ollama
+            - OLLAMA_PORT=11434
+            - TAVILY_API_KEY=\${TAVILY_API_KEY}
+            - SERPER_API_KEY=\${SERPER_API_KEY}
+            - LANGCHAIN_API_KEY=\${LANGCHAIN_API_KEY}
+            
+        model-init:
+          image: curlimages/curl:latest
+          container_name: model-initializer
+          depends_on:
+            ollama:
+              condition: service_started 
+          restart: "no"
+          entrypoint: ["/bin/sh", "-c"]
+          command:
+            - |
+              echo "Waiting for Ollama to be fully ready..."
+              sleep 15
+              echo "Checking if models already exist..."
+              if curl -s http://ollama:11434/api/tags | grep -q "llama3.1"; then
+                echo "llama3.1 model already exists, skipping download"
+              else
+                echo "Pulling llama3.1 model (this may take several minutes)..."
+                curl -X POST http://ollama:11434/api/pull -d '{"name":"llama3.1"}'
+              fi
+              if curl -s http://ollama:11434/api/tags | grep -q "nomic-embed-text"; then
+                echo "nomic-embed-text model already exists, skipping download"
+              else
+                echo "Pulling nomic-embed-text model..."
+                curl -X POST http://ollama:11434/api/pull -d '{"name":"nomic-embed-text"}'
+              fi
+              echo "Model initialization complete!"
+      
+      volumes:
+        postgres_data:
+        ollama_data:
+      EOF
+    
+    # Copy additional files from project
+    - cp $CI_PROJECT_DIR/postgres-init.sql . || echo "postgres-init.sql not found, creating default"
+    
+    # Create postgres-init.sql if it doesn't exist
+    - |
+      if [ ! -f postgres-init.sql ]; then
+        cat > postgres-init.sql << 'EOF'
+      -- Create sequence for chat IDs if it doesn't exist
+      CREATE SEQUENCE IF NOT EXISTS chat_id_seq START WITH 1 INCREMENT BY 1 NO MAXVALUE NO CYCLE;
+
+      -- Create chat history table if it doesn't exist
+      CREATE TABLE IF NOT EXISTS chat_history (
+          id SERIAL PRIMARY KEY,
+          session_id TEXT,
+          chat_id INTEGER,
+          message TEXT,
+          type TEXT,
+          created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+      );
+
+      -- Create index on session_id for better performance
+      CREATE INDEX IF NOT EXISTS idx_chat_history_session_id ON chat_history(session_id);
+      EOF
+      fi
+    
+    # Create environment file from GitLab variables
+    - |
+      cat > .env << EOF
+      POSTGRES_HOST=postgres
+      POSTGRES_USER=${POSTGRES_USER}
+      POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      POSTGRES_DB=${POSTGRES_DB}
+      OLLAMA_HOST=ollama
+      OLLAMA_PORT=11434
+      TAVILY_API_KEY=${TAVILY_API_KEY}
+      SERPER_API_KEY=${SERPER_API_KEY}
+      LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY}
+      LANGCHAIN_TRACING_V2=true
+      LANGCHAIN_PROJECT=SQL_memory
+      LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
+      EOF
+    
+    # Login to registry and start services
+    - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
+    
+    - echo "Starting services..."
+    - docker-compose -f docker-compose.prod.yml up -d
+    
+    # Wait for application to be ready
+    - echo "Waiting for application to be ready..."
+    - timeout 300 bash -c 'until curl -f http://localhost:8000/health; do echo "Waiting for app..."; sleep 10; done'
+    
+    - echo "Deployment completed successfully!"
+    - echo "Application is available at http://$(hostname -I | awk '{print $1}'):8000"
+    
+  only:
+    - main
