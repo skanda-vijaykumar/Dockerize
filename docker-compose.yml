@@ -7,16 +7,16 @@ services:
     container_name: nicomatic-postgres
     restart: always
     environment:
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: aspirine13z
-      POSTGRES_DB: alexis
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aspirine13z}
+      POSTGRES_DB: ${POSTGRES_DB:-alexis}
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres-init.sql:/docker-entrypoint-initdb.d/init.sql
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-postgres}"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -47,18 +47,19 @@ services:
 
   # FastAPI Application
   app:
+    # For development: build from local code
     build:
       context: .
       dockerfile: Dockerfile
+    # For production: use pre-built image (CI/CD will override this)
+    image: ${CI_REGISTRY_IMAGE:-nicomatic-app}:${CI_COMMIT_SHORT_SHA:-latest}
     container_name: nicomatic-app
     restart: always
     ports:
       - "8000:8000"
     volumes:
-      -  ${PWD}/extracted_best:/app/extracted_best
-      -  ${PWD}/extracted_best/lab:/app/extracted_best/lab
-
-
+      - ${PWD}/extracted_best:/app/extracted_best
+      - ${PWD}/extracted_best/lab:/app/extracted_best/lab
     depends_on:
       postgres:
         condition: service_healthy
@@ -71,14 +72,18 @@ services:
       timeout: 5s
       retries: 5
     environment:
-      - POSTGRES_HOST=postgres
-      - POSTGRES_USER=postgres
-      - POSTGRES_PASSWORD=aspirine13z
-      - POSTGRES_DB=alexis
-      - OLLAMA_HOST=ollama
-      - OLLAMA_PORT=11434
+      - POSTGRES_HOST=${POSTGRES_HOST:-postgres}
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-aspirine13z}
+      - POSTGRES_DB=${POSTGRES_DB:-alexis}
+      - OLLAMA_HOST=${OLLAMA_HOST:-ollama}
+      - OLLAMA_PORT=${OLLAMA_PORT:-11434}
       - TAVILY_API_KEY=${TAVILY_API_KEY}
       - SERPER_API_KEY=${SERPER_API_KEY}
+      - LANGCHAIN_API_KEY=${LANGCHAIN_API_KEY}
+      - LANGCHAIN_TRACING_V2=${LANGCHAIN_TRACING_V2:-true}
+      - LANGCHAIN_PROJECT=${LANGCHAIN_PROJECT:-SQL_memory}
+      - LANGCHAIN_ENDPOINT=${LANGCHAIN_ENDPOINT:-https://api.smith.langchain.com}
       - DATA_DIR=/app/extracted_best
 
   # Model Initialization Service
@@ -87,7 +92,7 @@ services:
     container_name: model-initializer
     depends_on:
       ollama:
-        condition: service_started  # Changed from service_healthy
+        condition: service_started
     restart: "no"
     entrypoint: ["/bin/sh", "-c"]
     command:
