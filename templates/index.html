@@ -529,6 +529,11 @@ function createNewSession() {
         scrollToBottom();
 
         try {
+            console.log('Sending message:', message);
+            console.log('Session ID:', currentSessionId);
+
+            const controller = new AbortController();
+            
             const response = await fetch('/chat', {
                 method: 'POST',
                 headers: {
@@ -537,10 +542,24 @@ function createNewSession() {
                 body: JSON.stringify({ 
                     message,
                     sessionId: currentSessionId
-                })
+                }),
+                signal: controller.signal
             });
 
-            if (!response.ok) throw new Error('Network response was not ok');
+            console.log('Response status:', response.status);
+            console.log('Response ok:', response.ok);
+            console.log('Response headers:', response.headers);
+
+            // Check if response is ok before trying to read it
+            if (!response.ok) {
+                console.error('Response not ok:', response.status, response.statusText);
+                throw new Error(`HTTP error! status: ${response.status} - ${response.statusText}`);
+            }
+
+            // Check if response has a body
+            if (!response.body) {
+                throw new Error('Response has no body');
+            }
 
             const reader = response.body.getReader();
             const decoder = new TextDecoder('utf-8');
@@ -551,106 +570,151 @@ function createNewSession() {
                 updateNotificationBadge();
             }
             
+            let resultText = '';
+            let hasReceivedData = false;
+            
             while (true) {
-                const { done, value } = await reader.read();
-                if (done) break; 
-                const chunk = decoder.decode(value, { stream: true });
-                resultText = chunk;
-                
                 try {
-                    const jsonData = JSON.parse(resultText);
+                    const { done, value } = await reader.read();
                     
-                    // Check if this is a question with images
-                    if (jsonData.type === "question_with_images") {
-                        // Remove any existing loading message
-                        const loadingElements = document.getElementsByClassName('loading-message');
-                        while (loadingElements.length > 0) {
-                            loadingElements[0].remove();
-                        }
-                        
-                        // Build image HTML
-                        let imagesHtml = '<div class="images-container">';
-                        jsonData.images.forEach(imagePath => {
-                            imagesHtml += `<img src="${imagePath}" alt="Connector Pitch" class="response-image" onload="scrollToBottom()">`;
-                        });
-                        imagesHtml += '</div>';
-                        
-                        const messageWithImages = `
-                            <div class="message bot-message">
-                                <img src="static/test.jpg" class="avatar" alt="Chatbot Avatar">
-                                <div class="message-bubble bot-bubble">
-                                    <p>${jsonData.question}</p>
-                                    ${imagesHtml}
-                                </div>
-                            </div>`;
-                        
-                        messagesDiv.innerHTML += messageWithImages;
-                        scrollToBottom();
-                    }
-                } catch (jsonError) {
-                    const loadingElements = document.getElementsByClassName('loading-message');
-                    while (loadingElements.length > 0) {
-                        loadingElements[0].remove();
-                    }
-
-                    // Check if the message has source links that need to be hidden
-                    let messageContent = chunk;
-                    let processedSourceLinks = '';
-                    let linkCount = 0;
+                    if (done) {
+                        console.log('Stream ended');
+                        break;
+                    } 
                     
-                    // Parse out source links if they exist
-                    if (messageContent.includes('View source documentation:')) {
-                        const parts = messageContent.split('View source documentation:');
-                        messageContent = parts[0].trim();
-                        
-                        // Extract the sources section
-                        if (parts.length > 1) {
-                            let sourcesText = parts[1];
-                            
-                            // Count links before processing - now includes relative URLs
-                            const linkMatches = sourcesText.match(/((?:https?:\/\/|\/)[^\s]+)/g) || [];
-                            linkCount = linkMatches.length;
-                            
-                            // Process both absolute and relative links to make them clickable
-                            sourcesText = sourcesText.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" class="source-link">$1</a>');
-                            sourcesText = sourcesText.replace(/(?<!href=")(\/source_document\/[^\s]+)/g, '<a href="$1" target="_blank" class="source-link">View Document</a>');
-                            
-                            processedSourceLinks = '<div class="source-links" style="display: none;"><p><strong>View source documentation:</strong></p>' + sourcesText + '</div>';
-                        }
+                    const chunk = decoder.decode(value, { stream: true });
+                    console.log('Received chunk:', chunk.substring(0, 100) + '...');
+                    
+                    if (chunk.trim()) {
+                        hasReceivedData = true;
+                        resultText += chunk;
                     }
                     
-                    // Create the message with toggle button if there are sources
-                    let toggleButton = '';
-                    if (processedSourceLinks) {
-                        toggleButton = `<button class="source-toggle-btn" onclick="toggleSourceLinks(this)">
-                            <span class="source-btn-text">Show Sources</span>
-                            <span class="source-count">${linkCount}</span>
-                        </button>`;
-                    }
-                    
-                    const regularMessage = `
-                        <div class="message bot-message">
-                            <img src="static/test.jpg" class="avatar" alt="Chatbot Avatar">
-                            <div class="message-bubble bot-bubble">
-                                ${messageContent.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" class="chat-link">$1</a>').replace(/\n/g, "<br>")}
-                                ${toggleButton}
-                                ${processedSourceLinks}
-                            </div>
-                        </div>`;
-                    
-                    // Add the message to the chat
-                    messagesDiv.innerHTML += regularMessage;
-                    scrollToBottom();
+                } catch (readError) {
+                    console.error('Error reading stream:', readError);
+                    break;
                 }
             }
 
+            // Remove loading message
+            const loadingElements = document.getElementsByClassName('loading-message');
+            while (loadingElements.length > 0) {
+                loadingElements[0].remove();
+            }
+
+            if (!hasReceivedData || !resultText.trim()) {
+                throw new Error('No data received from server');
+            }
+
+            console.log('Final result text length:', resultText.length);
+            
+            // Try to parse as JSON first (for special responses)
+            try {
+                const jsonData = JSON.parse(resultText);
+                
+                // Check if this is a question with images
+                if (jsonData.type === "question_with_images") {
+                    // Build image HTML
+                    let imagesHtml = '<div class="images-container">';
+                    jsonData.images.forEach(imagePath => {
+                        imagesHtml += `<img src="${imagePath}" alt="Connector Pitch" class="response-image" onload="scrollToBottom()">`;
+                    });
+                    imagesHtml += '</div>';
+                    
+                    const messageWithImages = `
+                        <div class="message bot-message">
+                            <img src="static/test.jpg" class="avatar" alt="Chatbot Avatar">
+                            <div class="message-bubble bot-bubble">
+                                <p>${jsonData.question}</p>
+                                ${imagesHtml}
+                            </div>
+                        </div>`;
+                    
+                    messagesDiv.innerHTML += messageWithImages;
+                    scrollToBottom();
+                    return;
+                }
+            } catch (jsonError) {
+                // Not JSON, treat as regular text response
+                console.log('Response is not JSON, treating as text');
+            }
+
+            // Process as regular text response
+            let messageContent = resultText.trim();
+            let processedSourceLinks = '';
+            let linkCount = 0;
+            
+            // Parse out source links if they exist
+            if (messageContent.includes('View source documentation:')) {
+                const parts = messageContent.split('View source documentation:');
+                messageContent = parts[0].trim();
+                
+                // Extract the sources section
+                if (parts.length > 1) {
+                    let sourcesText = parts[1];
+                    
+                    // Count links before processing
+                    const linkMatches = sourcesText.match(/((?:https?:\/\/|\/)[^\s]+)/g) || [];
+                    linkCount = linkMatches.length;
+                    
+                    // Process both absolute and relative links to make them clickable
+                    sourcesText = sourcesText.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" class="source-link">$1</a>');
+                    sourcesText = sourcesText.replace(/(?<!href=")(\/source_document\/[^\s]+)/g, '<a href="$1" target="_blank" class="source-link">View Document</a>');
+                    
+                    processedSourceLinks = '<div class="source-links" style="display: none;"><p><strong>View source documentation:</strong></p>' + sourcesText + '</div>';
+                }
+            }
+            
+            // Create the message with toggle button if there are sources
+            let toggleButton = '';
+            if (processedSourceLinks) {
+                toggleButton = `<button class="source-toggle-btn" onclick="toggleSourceLinks(this)">
+                    <span class="source-btn-text">Show Sources</span>
+                    <span class="source-count">${linkCount}</span>
+                </button>`;
+            }
+            
+            const regularMessage = `
+                <div class="message bot-message">
+                    <img src="static/test.jpg" class="avatar" alt="Chatbot Avatar">
+                    <div class="message-bubble bot-bubble">
+                        ${messageContent.replace(/(https?:\/\/[^\s]+)/g, '<a href="$1" target="_blank" class="chat-link">$1</a>').replace(/\n/g, "<br>")}
+                        ${toggleButton}
+                        ${processedSourceLinks}
+                    </div>
+                </div>`;
+            
+            // Add the message to the chat
+            messagesDiv.innerHTML += regularMessage;
+            scrollToBottom();
+
         } catch (error) {
+            console.error('Detailed error:', error);
+            console.error('Error stack:', error.stack);
+            
+            // Remove any remaining loading messages
+            const loadingElements = messagesDiv.getElementsByClassName('loading-message');
+            while (loadingElements.length > 0) {
+                loadingElements[0].remove();
+            }
+            
+            // Show user-friendly error message
+            let errorMessage = "Sorry, there was an error processing your message. Please try again.";
+            
+            if (error.message.includes('Failed to fetch')) {
+                errorMessage = "Connection error. Please check your internet connection and try again.";
+            } else if (error.message.includes('timeout')) {
+                errorMessage = "The request timed out. Please try again with a shorter message.";
+            } else if (error.message.includes('No data received')) {
+                errorMessage = "No response received from server. Please try again.";
+            }
+            
             messagesDiv.innerHTML += `
                 <div class="message bot-message">
                     <img src="static/test.jpg" class="avatar" alt="Chatbot Avatar">
                     <div class="message-bubble bot-bubble error-message">
-                        <p>Sorry, there was an error processing your message: ${error.message}</p>
-                        <p>Please try again later.</p>
+                        <p>${errorMessage}</p>
+                        <p style="font-size: 0.9em; color: #666; margin-top: 10px;">Error details: ${error.message}</p>
                     </div>
                 </div>`;
             scrollToBottom();
@@ -667,7 +731,6 @@ function createNewSession() {
             setTimeout(scrollToBottom, 100);
         }
     }
-
     // Function to toggle visibility of source links
     function toggleSourceLinks(button) {
         const sourcesDiv = button.nextElementSibling;
