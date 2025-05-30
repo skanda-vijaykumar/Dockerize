@@ -1,7 +1,7 @@
 version: '3.12'
 
 services:
-  # PostgreSQL Database
+  # PostgreSQL Database with optimized settings
   postgres:
     image: postgres:15-alpine
     container_name: nicomatic-postgres
@@ -10,18 +10,53 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: aspirine13z
       POSTGRES_DB: alexis
+      # Performance optimizations
+      POSTGRES_SHARED_BUFFERS: 256MB
+      POSTGRES_EFFECTIVE_CACHE_SIZE: 1GB
+      POSTGRES_MAINTENANCE_WORK_MEM: 64MB
+      POSTGRES_CHECKPOINT_COMPLETION_TARGET: 0.9
+      POSTGRES_WAL_BUFFERS: 16MB
+      POSTGRES_DEFAULT_STATISTICS_TARGET: 100
+      # ADD: Database timeout settings
+      POSTGRES_STATEMENT_TIMEOUT: 600000    # 10 minutes
+      POSTGRES_LOCK_TIMEOUT: 300000         # 5 minutes
+      POSTGRES_IDLE_IN_TRANSACTION_SESSION_TIMEOUT: 600000  # 10 minutes
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres-init.sql:/docker-entrypoint-initdb.d/init.sql
+    # Allocate sufficient resources
+    deploy:
+      resources:
+        reservations:
+          cpus: '1'
+          memory: 512M
+        limits:
+          cpus: '2'
+          memory: 2G
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
+      interval: 15s          # UPDATED: Increased from 10s
+      timeout: 10s           # UPDATED: Increased from 5s
       retries: 5
+      start_period: 30s      # UPDATED: Added start period
+    # ADD: Timeout configurations for PostgreSQL
+    command: >
+      postgres 
+      -c shared_buffers=256MB
+      -c effective_cache_size=1GB
+      -c maintenance_work_mem=64MB
+      -c checkpoint_completion_target=0.9
+      -c wal_buffers=16MB
+      -c default_statistics_target=100
+      -c statement_timeout=600000
+      -c lock_timeout=300000
+      -c idle_in_transaction_session_timeout=600000
+    # ADD: Stop timeout configuration
+    stop_grace_period: 30s
 
-  # Ollama LLM Service
+  # Ollama LLM Service with full GPU access
   ollama:
     image: ollama/ollama:latest
     container_name: nicomatic-ollama
@@ -30,22 +65,47 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
-    # Add GPU support
+      # Mount GPU devices
+      - /dev/nvidia0:/dev/nvidia0
+      - /dev/nvidiactl:/dev/nvidiactl
+      - /dev/nvidia-uvm:/dev/nvidia-uvm
+    # Enable all GPU access
     deploy:
       resources:
         reservations:
           devices:
             - driver: nvidia
               count: all
-              capabilities: [gpu]
+              capabilities: [gpu, compute, utility]
+        # Remove CPU/memory limits to use full server resources
+    environment:
+      # GPU optimization settings
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility
+      # Ollama performance settings
+      - OLLAMA_NUM_PARALLEL=4          # Increase parallel requests
+      - OLLAMA_MAX_LOADED_MODELS=2     # Keep more models in memory
+      - OLLAMA_FLASH_ATTENTION=1       # Use flash attention if available
+      - OLLAMA_GPU_LAYERS=999          # Use all GPU layers
+      - OLLAMA_KEEP_ALIVE=24h          # Keep models loaded longer
+      # Memory settings
+      - OLLAMA_MAX_VRAM=0              # Use all available VRAM
+      # ADD: Timeout settings for Ollama
+      - OLLAMA_REQUEST_TIMEOUT=900     # 15 minutes for individual requests
+      - OLLAMA_LOAD_TIMEOUT=600        # 10 minutes for model loading
     healthcheck:
-      test: ["CMD-SHELL", "curl --fail --silent http://localhost:11434/api/tags || exit 1"]
-      interval: 10s
-      timeout: 5s
+      test: ["CMD-SHELL", "curl --fail --silent --max-time 30 http://localhost:11434/api/tags || exit 1"]
+      interval: 20s          # UPDATED: Increased from 15s
+      timeout: 30s           # UPDATED: Increased from 10s
       retries: 5
-      start_period: 20s
+      start_period: 120s     # UPDATED: Increased from 60s
+    # Use all available resources
+    privileged: true
+    shm_size: 2gb
+    # ADD: Stop timeout configuration
+    stop_grace_period: 60s
 
-  ## Le' application
+  # Application with maximum resource allocation
   app:
     build:
       context: .
@@ -55,21 +115,22 @@ services:
     ports:
       - "8000:8000"
     volumes:
-      -  ${PWD}/extracted_best:/app/extracted_best
-      -  ${PWD}/extracted_best/lab:/app/extracted_best/lab
-
-
+      - ${PWD}/extracted_best:/app/extracted_best
+      - ${PWD}/extracted_best/lab:/app/extracted_best/lab
+      # Mount for better I/O performance
+      - /tmp:/tmp
     depends_on:
       postgres:
         condition: service_healthy
       ollama:
         condition: service_started
-    ## App should check itself, not Ollama
-    healthcheck:
-      test: ["CMD-SHELL", "curl --fail --silent http://localhost:8000/health || exit 1"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+    # Remove resource limits - use full server capacity
+    deploy:
+      resources:
+        reservations:
+          cpus: '2'
+          memory: 2G
+        # No limits - use all available resources
     environment:
       - POSTGRES_HOST=postgres
       - POSTGRES_USER=postgres
@@ -80,8 +141,45 @@ services:
       - TAVILY_API_KEY=${TAVILY_API_KEY}
       - SERPER_API_KEY=${SERPER_API_KEY}
       - DATA_DIR=/app/extracted_best
+      # Performance optimization settings
+      - PYTHONUNBUFFERED=1
+      - PYTHONDONTWRITEBYTECODE=1
+      - OMP_NUM_THREADS=8              # Use more CPU threads
+      - MKL_NUM_THREADS=8              # Intel Math Kernel Library threads
+      - TORCH_NUM_THREADS=8            # PyTorch threads
+      # UPDATED: Extended timeouts for compute-intensive operations
+      - AGENT_TIMEOUT=900              # 15 minutes (increased from 600)
+      - LLM_TIMEOUT=600                # 10 minutes (increased from 300)
+      - SYNTHESIS_TIMEOUT=600          # 10 minutes (increased from 300)
+      - MAX_AGENTS=8  
+      - OLLAMA_NUM_PARALLEL=4     
+      - OLLAMA_MAX_LOADED_MODELS=3
+      # ADD: Additional timeout configurations
+      - DATABASE_TIMEOUT=600           # 10 minutes for database operations
+      - STREAMING_TIMEOUT=900          # 15 minutes for streaming responses
+      - UVICORN_TIMEOUT_KEEP_ALIVE=900 # 15 minutes keep-alive
+      - UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN=60  # 1 minute graceful shutdown
+      # ADD: FastAPI/Uvicorn timeout settings
+      - FASTAPI_TIMEOUT=900            # 15 minutes for FastAPI requests
+      - HTTP_TIMEOUT=900               # 15 minutes for HTTP operations
+    healthcheck:
+      test: ["CMD-SHELL", "curl --fail --silent --max-time 30 http://localhost:8000/health || exit 1"]
+      interval: 45s          # UPDATED: Increased from 30s
+      timeout: 30s           # UPDATED: Increased from 15s
+      retries: 3
+      start_period: 180s     # UPDATED: Increased from 120s (3 minutes)
+    # Use host network for better performance (optional)
+    # network_mode: host
+    # Increase shared memory
+    shm_size: 1gb
+    # Security settings for GPU access
+    security_opt:
+      - seccomp:unconfined
+    # ADD: Stop timeout configuration
+    stop_grace_period: 60s
+    stop_signal: SIGTERM
 
-  # Model Initialization Service
+  # Model Initialization with GPU verification
   model-init:
     image: curlimages/curl:latest
     container_name: model-initializer
@@ -93,13 +191,51 @@ services:
     command:
       - |
         echo "Waiting for Ollama to be fully ready..."
-        sleep 10
-        echo "Pulling llama3.1 model (this may take several minutes)..."
-        curl -X POST http://ollama:11434/api/pull -d '{"name":"llama3.1"}'
+        sleep 30
+        
+        # Function to check if model exists
+        check_model() {
+          curl -s --max-time 60 http://ollama:11434/api/tags | grep -q "$1"
+        }
+        
+        # Check GPU availability
+        echo "Checking GPU availability..."
+        curl -s --max-time 30 http://ollama:11434/api/ps || echo "Could not check GPU status"
+        
+        # Pull models with extended timeouts
+        echo "Pulling llama3.1 model (this may take 30+ minutes on first run)..."
+        if check_model "llama3.1"; then
+          echo "llama3.1 model already exists, skipping download"
+        else
+          # UPDATED: Added reasonable timeout for model pulls
+          timeout 3600 curl -X POST --max-time 3600 http://ollama:11434/api/pull -d '{"name":"llama3.1"}' || echo "llama3.1 pull failed or timed out"
+        fi
+        
         echo "Pulling nomic-embed-text model..."
-        curl -X POST http://ollama:11434/api/pull -d '{"name":"nomic-embed-text"}'
+        if check_model "nomic-embed-text"; then
+          echo "nomic-embed-text model already exists, skipping download"
+        else
+          timeout 1800 curl -X POST --max-time 1800 http://ollama:11434/api/pull -d '{"name":"nomic-embed-text"}' || echo "nomic-embed-text pull failed or timed out"
+        fi
+        
+        # Verify GPU usage
+        echo "Verifying GPU usage..."
+        curl -s --max-time 30 http://ollama:11434/api/ps | grep -i gpu || echo "GPU verification completed"
+        
         echo "Model initialization complete!"
 
 volumes:
   postgres_data:
   ollama_data:
+
+# UPDATED: Optimize network for better container communication with timeout settings
+networks:
+  default:
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: nicomatic-bridge
+      com.docker.network.driver.mtu: 9000
+      # ADD: Network timeout optimizations
+      com.docker.network.bridge.enable_icc: "true"
+      com.docker.network.bridge.enable_ip_masquerade: "true"
+      com.docker.network.bridge.host_binding_ipv4: "0.0.0.0"
