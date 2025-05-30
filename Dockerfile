@@ -33,4 +33,9 @@ RUN echo 'from fastapi import FastAPI\n\napp = FastAPI()\n\n@app.get("/health")\
 EXPOSE 8000
 
 # Command to run the application
-CMD ["bash", "-c", "uvicorn route18:app --host 0.0.0.0 --port 8000"]
+CMD ["uvicorn", "route18:app", \
+     "--host", "0.0.0.0", \
+     "--port", "8000", \
+     "--timeout-keep-alive", "900", \
+     "--timeout-graceful-shutdown", "60", \
+     "--workers", "1"]
