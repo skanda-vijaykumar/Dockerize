@@ -964,10 +964,10 @@ def create_isolated_agent(tools):
     top_k=30, 
     base_url=OLLAMA_BASE_URL,
     cache=False,
-    client_kwargs={"timeout": 240})    
+    client_kwargs={"timeout": 700})    
     prompt = hub.pull("intern/ask10")
     agent = create_react_agent(llm=llm, tools=tools, prompt=prompt)
-    agent_executer = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True, max_iterations=2, max_execution_time=None, 
+    agent_executer = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True, max_iterations=3, max_execution_time=None, 
                                    callbacks=[StreamingStdOutCallbackHandler()], return_intermediate_steps=True, early_stopping_method='force')
     return agent_executer
 
@@ -1043,7 +1043,7 @@ class LLMConnectorSelector:
     top_k=30, 
     base_url=OLLAMA_BASE_URL,
     cache=False,
-    client_kwargs={"timeout": 240})  
+    client_kwargs={"timeout": 700})  
         ## Structure for the LLM response
         self.response_schemas = [ResponseSchema(name="value", description="The parsed value from user response"),ResponseSchema(name="confidence", description="Confidence score between 0 and 1"),
                                   ResponseSchema(name="reasoning", description="Explanation of the parsing logic")]
@@ -1635,7 +1635,7 @@ class LLMConnectorSelector:
             try:
                 response = await asyncio.wait_for(
                     self.llm.agenerate([[system_message, user_message]]),
-                    timeout=10  
+                    timeout=700 
                 )
                 response_text = response.generations[0][0].text.strip()
             except (asyncio.TimeoutError, Exception) as e:
@@ -2559,7 +2559,7 @@ class LLMConnectorSelector:
             try:
                 llm_response = await asyncio.wait_for(
                     self.llm.agenerate([messages]), 
-                    timeout=240.0 
+                    timeout=700.0 
                 )
                 response_text = llm_response.generations[0][0].text
                 
@@ -3367,7 +3367,7 @@ async def chat(request: Request):
     if not app_ready:
         print("Waiting for application startup to complete...")
         # Wait with timeout to avoid hanging indefinitely
-        if not startup_complete.wait(timeout=240):
+        if not startup_complete.wait(timeout=700):
             raise HTTPException(status_code=503, 
                               detail="Application is still initializing. Please try again in a few moments.")
 
@@ -3417,7 +3417,7 @@ async def chat(request: Request):
         agent_with_chat_history = await get_agent(tools)
         session_history.add_message(HumanMessage(content=user_input))
 
-        llm = ChatOllama(model="llama3.1",base_url=OLLAMA_BASE_URL, temperature=0.0, num_ctx=8152, cache=False, format="json")
+        llm = ChatOllama(model="llama3.1", temperature=0.0, num_ctx=8152, cache=False, format="json",base_url=OLLAMA_BASE_URL)
         
         print("Routing your query now")
         ## Routing query to either general or selection
@@ -3647,31 +3647,35 @@ async def chat(request: Request):
                     source_tracker = SourceTracker()
                     source_tracker.reset()
                     
+                    # Execute agent with timeout
                     response = await asyncio.wait_for(
-            agent_with_chat_history.ainvoke({
-                "input": user_input,
-                "chat_history": formatted_chat_history
-            }),
-            timeout=240
-        )
+                        agent_with_chat_history.ainvoke({
+                            "input": user_input,
+                            "chat_history": formatted_chat_history
+                        }),
+                        timeout=240
+                    )
+                    
+                    print(f"Agent response type: {type(response)}")
+                    print(f"Agent response keys: {response.keys() if isinstance(response, dict) else 'Not a dict'}")
                     
                     final_answer = ""
                     intermediate_data = []
                     used_tools = []
                     
                     if isinstance(response, dict):
-                        ## Extract intermediate steps if available
+                        # Extract intermediate steps if available
                         intermediate_steps = response.get('intermediate_steps', [])
                         
                         # Process intermediate steps
-                        # print("\n=== AGENT INTERMEDIATE STEPS ===")
+                        print(f"\n=== PROCESSING {len(intermediate_steps)} INTERMEDIATE STEPS ===")
                         for step_idx, step in enumerate(intermediate_steps):
                             if len(step) > 1:
                                 tool_name = step[0].tool if hasattr(step[0], 'tool') else "Unknown tool"
                                 tool_input = step[0].tool_input if hasattr(step[0], 'tool_input') else "Unknown input"
                                 
-                                # print(f"Step {step_idx+1}: Using tool: {tool_name}")
-                                # print(f"  Tool input: {tool_input}")
+                                print(f"Step {step_idx+1}: Using tool: {tool_name}")
+                                print(f"  Tool input: {tool_input}")
                                 
                                 # Track used tools
                                 used_tools.append(tool_name)
@@ -3685,51 +3689,79 @@ async def chat(request: Request):
                                 
                                 # Store output for response synthesis
                                 intermediate_data.append(output_str)
-                        # print("=== END OF AGENT STEPS ===\n")
+                                print(f"  Tool output length: {len(output_str)} chars")
                         
-                        # Generate response
-                        llm = ChatOllama(
-    model="llama3.1", 
-    temperature=0.0, 
-    disable_streaming=False,
-    num_ctx=8152, 
-    top_p=0.7, 
-    top_k=30, 
-    base_url=OLLAMA_BASE_URL,
-    cache=False,
-    client_kwargs={"timeout": 240})  
+                        print("=== END OF INTERMEDIATE STEPS ===\n")
+                        
+                        # Get the agent's output
+                        agent_output = response.get('output', '')
+                        print(f"Agent output: '{agent_output}'")
+                        print(f"Agent output type: {type(agent_output)}")
+                        
+                        # Handle different response scenarios
+                        if agent_output and agent_output != "Agent stopped due to iteration limit or time limit.":
+                            # Agent provided a direct output
+                            final_answer = str(agent_output).strip()
+                            print(f"Using direct agent output: {final_answer[:100]}...")
                             
-                        if response.get('output', '') == "Agent stopped due to iteration limit or time limit.":
+                        elif intermediate_data:
+                            # Agent didn't provide output but we have tool data - synthesize response
+                            print("Agent output empty/invalid, synthesizing from tool data...")
+                            
+                            llm = ChatOllama(
+                                model="llama3.1", 
+                                temperature=0.0, 
+                                disable_streaming=False,
+                                num_ctx=8152, 
+                                top_p=0.7, 
+                                top_k=30, 
+                                base_url=OLLAMA_BASE_URL,
+                                cache=False,
+                                client_kwargs={"timeout": 700}
+                            )
+                            
                             llm_prompt = f"""
-                            Please provide a helpful response to the user's question strictly based on the information gathered from the system.
-                            Response should be relevant and must answer user's question accurately.
-                            \nuser's question: {user_input}
+                            Please provide a helpful response to the user's question based on the information gathered from our systems.
+                            Be direct and answer the question clearly.
 
-                            \nHere is information gathered from our systems:
-                            \n{''.join(intermediate_data)}
+                            User's question: {user_input}
+
+                            Information from our systems:
+                            {chr(10).join(intermediate_data)}
+
+                            Conversation history for context:
+                            {formatted_chat_history}
                             
-                            \nconversation history just for context:
-                            \n{formatted_chat_history}
-                            
+                            Provide a clear, direct answer to the user's question.
                             """
 
-                            synthesized_response = await llm.ainvoke(llm_prompt)
-                            final_answer = str(synthesized_response.content).strip('{}')
+                            try:
+                                synthesized_response = await asyncio.wait_for(
+                                    llm.ainvoke(llm_prompt),
+                                    timeout=700
+                                )
+                                final_answer = str(synthesized_response.content).strip()
+                                print(f"Synthesized response: {final_answer[:100]}...")
+                            except Exception as synth_error:
+                                print(f"Error in response synthesis: {synth_error}")
+                                # Fallback to raw tool data
+                                final_answer = "\n\n".join(intermediate_data)
+                                
                         else:
-                            final_answer = response.get('output', '') or str(response)
-
-                        ## Clean up final answer
+                            # No usable output from agent or tools
+                            print("No usable output from agent or tools")
+                            final_answer = "I apologize, but I wasn't able to find a specific answer to your question. Could you please rephrase or provide more details?"
+                        
+                        # Clean up final answer
                         final_answer = final_answer.replace("Final Answer:", "").strip()
-                    
-                        # Create clickable file links if catalog or lab tools were used
+                        
+                        # Add source links if catalog or lab tools were used
                         if "Nicomatic_connector_catalogue" in used_tools or "Nicomatic_lab_tests" in used_tools:
-                            # Get the list of NodeWithScore objects
                             source_nodes = source_tracker.get_source_nodes() 
                             if source_nodes:
                                 links_text = "\n\nView source documentation:"
                                 link_parts = set() 
                                 for node_with_score in source_nodes:
-                                    # Access metadata from the inner .node attribute
                                     if hasattr(node_with_score, 'node') and hasattr(node_with_score.node, 'metadata'):
                                         metadata = node_with_score.node.metadata
                                         abs_path = metadata.get("absolute_path") 
@@ -3740,33 +3772,51 @@ async def chat(request: Request):
                                         file_base = os.path.splitext(filename)[0] 
                                         
                                         # Properly encode the path for URL
-                                        # Don't replace .md with .pdf here, let the endpoint handle file type
                                         encoded_path = urllib.parse.quote(abs_path, safe='/').replace(".md", ".pdf") 
-                                        
-                                        # Pull the page number out of the metadata (default to 1)
                                         page_number = metadata.get("page_number", 1) 
-
-                                        # Build the link with proper formatting
                                         link = f"\n- {file_base} (Page {page_number}): /source_document/{encoded_path}#page={page_number}"
                                         link_parts.add(link)
 
                                 if link_parts:
-                                    # Sort links alphabetically for consistent order
                                     links_text += "\n" + "\n".join(sorted(list(link_parts))) 
-
-                                # Combine answer with links
-                                full_response = final_answer + links_text 
-                            else:
-                                full_response = final_answer
-                        else:
-                            full_response = final_answer
-                        session_history.add_message(AIMessage(content=full_response))
-                        yield full_response 
+                                    final_answer = final_answer + links_text 
+                        
+                        # Ensure we have some response
+                        if not final_answer or final_answer.strip() == "":
+                            final_answer = "I apologize, but I wasn't able to generate a response to your question. Please try rephrasing or asking something else."
+                        
+                        print(f"Final answer length: {len(final_answer)} chars")
+                        print(f"Final answer preview: {final_answer[:200]}...")
+                        
+                        # Store in session history
+                        session_history.add_message(AIMessage(content=final_answer))
+                        
+                        # Yield the response
+                        yield final_answer 
+                        
                     else:
-                        error_msg = "Received unexpected response format from agent"
-                        logging.error(error_msg)
+                        # Response is not a dictionary - handle as string or other type  
+                        error_msg = f"Received unexpected response format from agent: {type(response)}"
+                        print(error_msg)
                         session_history.add_message(AIMessage(content=error_msg))
                         yield error_msg
+                        
+                    # Return agent to pool
+                    return_agent(agent_with_chat_history)
+                    
+                except asyncio.TimeoutError:
+                    error_message = "The request timed out. Please try again with a simpler question."
+                    print(f"Timeout error in generate_response")
+                    session_history.add_message(AIMessage(content=error_message))
+                    yield error_message
+                    
+                except Exception as e:
+                    error_message = f"I apologize, but I encountered an error while processing your request. Please try again."
+                    print(f"Error in generate_response: {str(e)}")
+                    import traceback
+                    traceback.print_exc()
+                    session_history.add_message(AIMessage(content=error_message))
+                    yield error_message
                     return_agent(agent_with_chat_history)       
                 except Exception as e:
                     error_message = f"I apologize, but I encountered an error while processing your request: {str(e)}"
@@ -3785,7 +3835,7 @@ async def chat(request: Request):
 async def new_session():
     if not app_ready:
         print("Waiting for application startup to complete before creating new session...")
-        if not startup_complete.wait(timeout=240):
+        if not startup_complete.wait(timeout=700):
             raise HTTPException(status_code=503, 
                               detail="Application is still initializing. Please try again in a few moments.")
     conn_info = f"postgresql://{POSTGRES_USER}:{POSTGRES_PASSWORD}@{POSTGRES_HOST}/{POSTGRES_DB}"
