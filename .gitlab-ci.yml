@@ -69,40 +69,29 @@ deploy:
     name: production
     url: http://localhost:8000
   before_script:
-    # Install required tools
     - apk add --no-cache docker-cli curl bash
-    # Install docker-compose
     - curl -L "https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64" -o /usr/local/bin/docker-compose
     - chmod +x /usr/local/bin/docker-compose
     - export DOCKER_HOST="unix:///var/run/docker.sock"
-    - docker --version
-    - docker-compose --version
   script:
     - echo "Starting deployment process..."
-    
-    # Create necessary directories
     - mkdir -p /opt/nicomatic-app
     - cd /opt/nicomatic-app
     
-    # Test Docker connection
-    - docker ps
-    
-    # Stop existing services gracefully
+    # Stop existing services by container name first
     - echo "Stopping existing services..."
-    - docker-compose -f docker-compose.prod.yml down --remove-orphans || true
+    - docker stop nicomatic-app nicomatic-postgres nicomatic-ollama model-initializer || true
+    - docker rm nicomatic-app nicomatic-postgres nicomatic-ollama model-initializer || true
+    - docker network rm nicomatic-app_default || true
     
-    # Clean up old images (keep last 2 versions)
+    # Clean up old images
     - echo "Cleaning up old images..."
     - docker images --format "table {{.Repository}}:{{.Tag}}\t{{.CreatedAt}}" | grep "$CI_REGISTRY_IMAGE/app" | tail -n +3 | awk '{print $1}' | xargs -r docker rmi || true
     
-    # Create deployment files
+    # Create the improved docker-compose file
     - echo "Creating deployment configuration..."
-    
-    # Create production docker-compose file
     - |
       cat > docker-compose.prod.yml << EOF
-      version: '3.12'
-      
       services:
         postgres:
           image: postgres:15-alpine
@@ -131,15 +120,27 @@ deploy:
             - "11434:11434"
           volumes:
             - ollama_data:/root/.ollama
+          # GPU SUPPORT ADDED HERE
+          deploy:
+            resources:
+              reservations:
+                devices:
+                  - driver: nvidia
+                    count: all
+                    capabilities: [gpu]
+          # Alternative runtime method (use one or the other)
+          # runtime: nvidia
+          # environment:
+          #   - NVIDIA_VISIBLE_DEVICES=all
           healthcheck:
-            test: ["CMD-SHELL", "curl --fail --silent http://localhost:11434/api/tags || exit 1"]
-            interval: 10s
-            timeout: 5s
-            retries: 5
-            start_period: 20s
+            test: ["CMD-SHELL", "curl --silent http://localhost:11434/api/tags >/dev/null 2>&1 || exit 1"]
+            interval: 30s
+            timeout: 15s
+            retries: 10
+            start_period: 120s
             
         app:
-          image: $APP_IMAGE
+          image: \$APP_IMAGE
           container_name: nicomatic-app
           restart: always
           ports:
@@ -151,9 +152,10 @@ deploy:
               condition: service_started
           healthcheck:
             test: ["CMD-SHELL", "curl --fail --silent http://localhost:8000/health || exit 1"]
-            interval: 10s
-            timeout: 5s
-            retries: 5
+            interval: 30s
+            timeout: 10s
+            retries: 20
+            start_period: 600s
           environment:
             - POSTGRES_HOST=postgres
             - POSTGRES_USER=\${POSTGRES_USER}
@@ -170,13 +172,21 @@ deploy:
           container_name: model-initializer
           depends_on:
             ollama:
-              condition: service_started 
+              condition: service_started
           restart: "no"
           entrypoint: ["/bin/sh", "-c"]
           command:
             - |
-              echo "Waiting for Ollama to be fully ready..."
-              sleep 15
+              echo "Waiting for Ollama to be ready..."
+              for i in $$(seq 1 30); do
+                if curl -s http://ollama:11434/api/tags >/dev/null 2>&1; then
+                  echo "Ollama is ready!"
+                  break
+                fi
+                echo "Attempt \$$i/30: Ollama not ready, waiting 10 seconds..."
+                sleep 10
+              done
+              
               echo "Checking if models already exist..."
               if curl -s http://ollama:11434/api/tags | grep -q "llama3.1"; then
                 echo "llama3.1 model already exists, skipping download"
@@ -184,30 +194,28 @@ deploy:
                 echo "Pulling llama3.1 model (this may take several minutes)..."
                 curl -X POST http://ollama:11434/api/pull -d '{"name":"llama3.1"}'
               fi
+              
               if curl -s http://ollama:11434/api/tags | grep -q "nomic-embed-text"; then
                 echo "nomic-embed-text model already exists, skipping download"
               else
                 echo "Pulling nomic-embed-text model..."
                 curl -X POST http://ollama:11434/api/pull -d '{"name":"nomic-embed-text"}'
               fi
+              
               echo "Model initialization complete!"
-      
+
       volumes:
         postgres_data:
         ollama_data:
       EOF
-    
-    # Copy additional files from project
+    # Copy necessary files
     - cp $CI_PROJECT_DIR/postgres-init.sql . || echo "postgres-init.sql not found, creating default"
     
-    # Create postgres-init.sql if it doesn't exist
+    # Create postgres-init.sql if needed
     - |
       if [ ! -f postgres-init.sql ]; then
         cat > postgres-init.sql << 'EOF'
-      -- Create sequence for chat IDs if it doesn't exist
       CREATE SEQUENCE IF NOT EXISTS chat_id_seq START WITH 1 INCREMENT BY 1 NO MAXVALUE NO CYCLE;
-
-      -- Create chat history table if it doesn't exist
       CREATE TABLE IF NOT EXISTS chat_history (
           id SERIAL PRIMARY KEY,
           session_id TEXT,
@@ -216,13 +224,11 @@ deploy:
           type TEXT,
           created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
       );
-
-      -- Create index on session_id for better performance
       CREATE INDEX IF NOT EXISTS idx_chat_history_session_id ON chat_history(session_id);
       EOF
       fi
     
-    # Create environment file from GitLab variables
+    # Create environment file
     - |
       cat > .env << EOF
       POSTGRES_HOST=postgres
@@ -239,18 +245,45 @@ deploy:
       LANGCHAIN_ENDPOINT=https://api.smith.langchain.com
       EOF
     
-    # Login to registry and start services
+    # Login and start services
     - echo $CI_REGISTRY_PASSWORD | docker login -u $CI_REGISTRY_USER --password-stdin $CI_REGISTRY
-    
     - echo "Starting services..."
     - docker-compose -f docker-compose.prod.yml up -d
     
-    # Wait for application to be ready
-    - echo "Waiting for application to be ready..."
-    - timeout 300 bash -c 'until curl -f http://localhost:8000/health; do echo "Waiting for app..."; sleep 10; done'
-    
-    - echo "Deployment completed successfully!"
-    - echo "Application is available at http://$(hostname -I | awk '{print $1}'):8000"
+    - echo "Monitoring service startup..."
+    - |
+      echo "Waiting for services to start (up to 15 minutes)..."
+      timeout 900 bash -c '
+        while true; do
+          echo "=== Service Status at $(date) ==="
+          docker-compose -f docker-compose.prod.yml ps
+          
+          echo "=== Container Health ==="
+          docker ps --format "table {{.Names}}\t{{.Status}}" | grep nicomatic || true
+          
+          echo "=== Checking App Health via Docker ==="
+          # Check health using docker exec instead of curl from CI runner
+          if docker exec nicomatic-app curl -f http://localhost:8000/health >/dev/null 2>&1; then
+            echo "✅ Application is healthy!"
+            break
+          else
+            echo "⏳ Application not ready yet"
+            echo "App logs (last 5 lines):"
+            docker logs nicomatic-app --tail 5 || true
+          fi
+          
+          echo "===================="
+          sleep 30
+        done
+      '
+
+    - echo "✅ Deployment completed successfully!"
+    - echo "🌐 Application is available at http://$(hostname -I | awk '{print $1}'):8000"
+
+    # Final status check using docker exec
+    - echo "=== Final Status ==="
+    - docker-compose -f docker-compose.prod.yml ps
+    - docker exec nicomatic-app curl -s http://localhost:8000/health && echo "Application health check passed" || echo "Application health check failed"
     
   only:
     - main
