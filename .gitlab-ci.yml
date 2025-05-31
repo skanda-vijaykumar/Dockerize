@@ -188,11 +188,11 @@ deploy:
               done
               
               echo "Checking if models already exist..."
-              if curl -s http://ollama:11434/api/tags | grep -q "llama3.1"; then
-                echo "llama3.1 model already exists, skipping download"
+              if curl -s http://ollama:11434/api/tags | grep -q "qwen3:4b"; then
+                echo "qwen3:4b model already exists, skipping download"
               else
-                echo "Pulling llama3.1 model (this may take several minutes)..."
-                curl -X POST http://ollama:11434/api/pull -d '{"name":"llama3.1"}'
+                echo "Pulling qwen3:4b model (this may take several minutes)..."
+                curl -X POST http://ollama:11434/api/pull -d '{"name":"qwen3:4b"}'
               fi
               
               if curl -s http://ollama:11434/api/tags | grep -q "nomic-embed-text"; then
