@@ -203,12 +203,12 @@ services:
         curl -s --max-time 30 http://ollama:11434/api/ps || echo "Could not check GPU status"
         
         # Pull models with extended timeouts
-        echo "Pulling llama3.1 model (this may take 30+ minutes on first run)..."
-        if check_model "llama3.1"; then
-          echo "llama3.1 model already exists, skipping download"
+        echo "Pulling qwen3:4b model (this may take 30+ minutes on first run)..."
+        if check_model "qwen3:4b"; then
+          echo "qwen3:4b model already exists, skipping download"
         else
           # UPDATED: Added reasonable timeout for model pulls
-          timeout 3600 curl -X POST --max-time 3600 http://ollama:11434/api/pull -d '{"name":"llama3.1"}' || echo "llama3.1 pull failed or timed out"
+          timeout 3600 curl -X POST --max-time 3600 http://ollama:11434/api/pull -d '{"name":"qwen3:4b"}' || echo "qwen3:4b pull failed or timed out"
         fi
         
         echo "Pulling nomic-embed-text model..."
