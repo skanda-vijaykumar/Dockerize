@@ -539,7 +539,7 @@ def processing_data(documents1, documents3):
 
         ## Settings
         print("Initializing language model and embedding model...")
-        Settings.llm = Ollama(model="llama3.1", temperature=0.0, num_ctx=8012, top_p=0.5, base_url=OLLAMA_BASE_URL)
+        Settings.llm = Ollama(model="qwen3:4b", temperature=0.0, num_ctx=8012, top_p=0.5, base_url=OLLAMA_BASE_URL)
         Settings.embed_model = OllamaEmbeddings(model="nomic-embed-text", base_url=OLLAMA_BASE_URL)
         
         print("Creating storage contexts...")
@@ -956,7 +956,7 @@ def creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_m
 # Create an isolated agent with its own LLM instance
 def create_isolated_agent(tools):
     llm = ChatOllama(
-    model="llama3.1", 
+    model="qwen3:4b", 
     temperature=0.0, 
     disable_streaming=False,
     num_ctx=8152, 
@@ -977,7 +977,7 @@ def create_isolated_agent(tools):
 #     worker_id = os.getpid()
 #     if worker_id not in _worker_llm_cache:
 #         _worker_llm_cache[worker_id] = ChatOllama(
-#             model="llama3.1",
+#             model="qwen3:4b",
 #             temperature=0.01,
 #             num_ctx=6000,
 #             client_id=f"worker-{worker_id}"
@@ -1003,7 +1003,7 @@ def return_agent(agent):
 
 # def get_llm():
 #     return ChatOllama(
-#         model="llama3.1",
+#         model="qwen3:4b",
 #         temperature=0.01,
 #         num_ctx=8126,
 #         cache=False,
@@ -1035,7 +1035,7 @@ class LLMConnectorSelector:
     def __init__(self):
         ## Chatmodel
         self.llm = ChatOllama(
-    model="llama3.1", 
+    model="qwen3:4b", 
     temperature=0.0, 
     disable_streaming=False,
     num_ctx=8152, 
@@ -3417,7 +3417,7 @@ async def chat(request: Request):
         agent_with_chat_history = await get_agent(tools)
         session_history.add_message(HumanMessage(content=user_input))
 
-        llm = ChatOllama(model="llama3.1", temperature=0.0, num_ctx=8152, cache=False, format="json",base_url=OLLAMA_BASE_URL)
+        llm = ChatOllama(model="qwen3:4b", temperature=0.0, num_ctx=8152, cache=False, format="json",base_url=OLLAMA_BASE_URL)
         
         print("Routing your query now")
         ## Routing query to either general or selection
@@ -3709,7 +3709,7 @@ async def chat(request: Request):
                             print("Agent output empty/invalid, synthesizing from tool data...")
                             
                             llm = ChatOllama(
-                                model="llama3.1", 
+                                model="qwen3:4b", 
                                 temperature=0.0, 
                                 disable_streaming=False,
                                 num_ctx=8152, 
