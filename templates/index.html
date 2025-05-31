@@ -533,7 +533,7 @@ function createNewSession() {
             console.log('Session ID:', currentSessionId);
 
             const controller = new AbortController();
-            
+            const timeoutId = setTimeout(() => controller.abort(), 500000);
             const response = await fetch('/chat', {
                 method: 'POST',
                 headers: {
@@ -545,7 +545,13 @@ function createNewSession() {
                 }),
                 signal: controller.signal
             });
-
+            clearTimeout(timeoutId);
+            if (!response.ok) {
+                if (response.status === 504) {
+                    throw new Error('Request timed out. The server is taking too long to respond.');
+                }
+                throw new Error(`HTTP error! status: ${response.status} - ${response.statusText}`);
+            }
             console.log('Response status:', response.status);
             console.log('Response ok:', response.ok);
             console.log('Response headers:', response.headers);
