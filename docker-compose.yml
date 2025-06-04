@@ -18,9 +18,9 @@ services:
       POSTGRES_WAL_BUFFERS: 16MB
       POSTGRES_DEFAULT_STATISTICS_TARGET: 100
       # ADD: Database timeout settings
-      POSTGRES_STATEMENT_TIMEOUT: 600000    # 10 minutes
-      POSTGRES_LOCK_TIMEOUT: 300000         # 5 minutes
-      POSTGRES_IDLE_IN_TRANSACTION_SESSION_TIMEOUT: 600000  # 10 minutes
+      POSTGRES_STATEMENT_TIMEOUT: 600000    
+      POSTGRES_LOCK_TIMEOUT: 300000        
+      POSTGRES_IDLE_IN_TRANSACTION_SESSION_TIMEOUT: 600000 
     ports:
       - "5432:5432"
     volumes:
@@ -30,18 +30,17 @@ services:
     deploy:
       resources:
         reservations:
-          cpus: '1'
-          memory: 512M
-        limits:
           cpus: '2'
-          memory: 2G
+          memory: 4G
+        limits:
+          cpus: '4'
+          memory: 8G
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 15s          # UPDATED: Increased from 10s
-      timeout: 10s           # UPDATED: Increased from 5s
+      interval: 60s        
+      timeout: 60s         
       retries: 5
-      start_period: 30s      # UPDATED: Added start period
-    # ADD: Timeout configurations for PostgreSQL
+      start_period: 30s    
     command: >
       postgres 
       -c shared_buffers=256MB
@@ -83,22 +82,21 @@ services:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
       # Ollama performance settings
-      - OLLAMA_NUM_PARALLEL=4          # Increase parallel requests
-      - OLLAMA_MAX_LOADED_MODELS=2     # Keep more models in memory
-      - OLLAMA_FLASH_ATTENTION=1       # Use flash attention if available
-      - OLLAMA_GPU_LAYERS=999          # Use all GPU layers
-      - OLLAMA_KEEP_ALIVE=24h          # Keep models loaded longer
+      - OLLAMA_NUM_PARALLEL=2        
+      - OLLAMA_MAX_LOADED_MODELS=2     
+      - OLLAMA_FLASH_ATTENTION=1       
+      - OLLAMA_GPU_LAYERS=999          
+      - OLLAMA_KEEP_ALIVE=24h         
       # Memory settings
-      - OLLAMA_MAX_VRAM=0              # Use all available VRAM
-      # ADD: Timeout settings for Ollama
-      - OLLAMA_REQUEST_TIMEOUT=900     # 15 minutes for individual requests
-      - OLLAMA_LOAD_TIMEOUT=600        # 10 minutes for model loading
+      - OLLAMA_MAX_VRAM=0            
+      - OLLAMA_REQUEST_TIMEOUT=1800
+      - OLLAMA_LOAD_TIMEOUT=600
     healthcheck:
       test: ["CMD-SHELL", "curl --fail --silent --max-time 30 http://localhost:11434/api/tags || exit 1"]
-      interval: 20s          # UPDATED: Increased from 15s
-      timeout: 30s           # UPDATED: Increased from 10s
+      interval: 60s          
+      timeout: 60s          
       retries: 5
-      start_period: 120s     # UPDATED: Increased from 60s
+      start_period: 240s     
     # Use all available resources
     privileged: true
     shm_size: 2gb
@@ -117,7 +115,6 @@ services:
     volumes:
       - ${PWD}/extracted_best:/app/extracted_best
       - ${PWD}/extracted_best/lab:/app/extracted_best/lab
-      # Mount for better I/O performance
       - /tmp:/tmp
     depends_on:
       postgres:
@@ -144,33 +141,30 @@ services:
       # Performance optimization settings
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
-      - OMP_NUM_THREADS=8              # Use more CPU threads
-      - MKL_NUM_THREADS=8              # Intel Math Kernel Library threads
-      - TORCH_NUM_THREADS=8            # PyTorch threads
+      - OMP_NUM_THREADS=8             
+      - MKL_NUM_THREADS=8             
+      - TORCH_NUM_THREADS=8            
       # UPDATED: Extended timeouts for compute-intensive operations
-      - AGENT_TIMEOUT=900              # 15 minutes (increased from 600)
-      - LLM_TIMEOUT=600                # 10 minutes (increased from 300)
-      - SYNTHESIS_TIMEOUT=600          # 10 minutes (increased from 300)
+      - AGENT_TIMEOUT=900              
+      - LLM_TIMEOUT=600               
+      - SYNTHESIS_TIMEOUT=600        
       - MAX_AGENTS=8  
       - OLLAMA_NUM_PARALLEL=4     
       - OLLAMA_MAX_LOADED_MODELS=3
       # ADD: Additional timeout configurations
-      - DATABASE_TIMEOUT=600           # 10 minutes for database operations
-      - STREAMING_TIMEOUT=900          # 15 minutes for streaming responses
-      - UVICORN_TIMEOUT_KEEP_ALIVE=900 # 15 minutes keep-alive
-      - UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN=60  # 1 minute graceful shutdown
+      - DATABASE_TIMEOUT=600      
+      - STREAMING_TIMEOUT=900        
+      - UVICORN_TIMEOUT_KEEP_ALIVE=900 
+      - UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN=60 
       # ADD: FastAPI/Uvicorn timeout settings
-      - FASTAPI_TIMEOUT=900            # 15 minutes for FastAPI requests
-      - HTTP_TIMEOUT=900               # 15 minutes for HTTP operations
+      - FASTAPI_TIMEOUT=900           
+      - HTTP_TIMEOUT=900               
     healthcheck:
       test: ["CMD-SHELL", "curl --fail --silent --max-time 30 http://localhost:8000/health || exit 1"]
-      interval: 45s          # UPDATED: Increased from 30s
-      timeout: 30s           # UPDATED: Increased from 15s
+      interval: 60s          
+      timeout: 60s           
       retries: 3
-      start_period: 180s     # UPDATED: Increased from 120s (3 minutes)
-    # Use host network for better performance (optional)
-    # network_mode: host
-    # Increase shared memory
+      start_period: 180s     
     shm_size: 1gb
     # Security settings for GPU access
     security_opt:
@@ -235,7 +229,6 @@ networks:
     driver_opts:
       com.docker.network.bridge.name: nicomatic-bridge
       com.docker.network.driver.mtu: 9000
-      # ADD: Network timeout optimizations
       com.docker.network.bridge.enable_icc: "true"
       com.docker.network.bridge.enable_ip_masquerade: "true"
       com.docker.network.bridge.host_binding_ipv4: "0.0.0.0"
