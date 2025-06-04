@@ -382,58 +382,38 @@ class RankedNodesLogger():
         
     def postprocess_nodes(self, nodes, query_bundle):
         # Limit the number of nodes before reranking to improve performance
-        max_nodes_to_rerank = 15  # Reduced from 30
+        max_nodes_to_rerank = 30
         if len(nodes) > max_nodes_to_rerank:
             print(f"Limiting from {len(nodes)} to {max_nodes_to_rerank} nodes before reranking")
-            
-            # FIX: Handle None scores properly in sorting
-            def safe_score_key(node):
-                """Safely extract score, handling None values"""
-                if hasattr(node, 'score') and node.score is not None:
-                    try:
-                        return float(node.score)
-                    except (ValueError, TypeError):
-                        return 0.0
-                else:
-                    return 0.0
-            
-            # Sort by score before limiting, using the safe key function
-            nodes = sorted(nodes, key=safe_score_key, reverse=True)[:max_nodes_to_rerank]
+            # Sort by score before limiting, to make sure we get the best ones
+            nodes = sorted(nodes, key=lambda x: x.score if hasattr(x, 'score') else 0.0, reverse=True)[:max_nodes_to_rerank]
         
         # Pass nodes through the underlying reranker
         try:
             reranked_nodes = self.reranker.postprocess_nodes(nodes, query_bundle)
         except Exception as e:
             print(f"Error during reranking: {str(e)}. Falling back to original nodes.")
-            reranked_nodes = nodes[:min(10, len(nodes))] 
+            reranked_nodes = nodes[:min(15, len(nodes))]  # Limit to 15 nodes as a fallback
         
         # Limit the number of nodes returned after reranking
-        max_nodes_to_return = 10 
+        max_nodes_to_return = 15
         if len(reranked_nodes) > max_nodes_to_return:
             print(f"Limiting from {len(reranked_nodes)} to {max_nodes_to_return} nodes after reranking")
             reranked_nodes = reranked_nodes[:max_nodes_to_return]
         
         # Log the reranked nodes
-        print(f"\n=== RERANKED NODES: {len(reranked_nodes)} nodes ===")
+        print("\n=== RERANKED NODES ===")
+        print(f"Showing {len(reranked_nodes)} nodes after reranking")
         
         # Add all sources to the global tracker
         self.source_tracker.add_sources_from_nodes(reranked_nodes)
         
         # Only log a subset of nodes to reduce console output
-        for i, node in enumerate(reranked_nodes[:5]):  
+        for i, node in enumerate(reranked_nodes[:10]):  # Only log top 10 for clarity
             source = node.node.metadata.get("source", "Unknown")
             connector_family = node.node.metadata.get("connector_family", "Unknown")
             file_type = node.node.metadata.get("file_type", "Unknown")
-            
-            # Safely handle score display
-            if hasattr(node, 'score') and node.score is not None:
-                try:
-                    score = f"{float(node.score):.3f}"
-                except (ValueError, TypeError):
-                    score = "0.000"
-            else:
-                score = "0.000"
-                
+            score = node.score if hasattr(node, 'score') else "N/A"
             absolute_path = node.node.metadata.get("absolute_path", "Unknown path")
             
             print(f"Node {i+1}: {source} | Family: {connector_family} | Type: {file_type} | Score: {score}")
@@ -445,12 +425,13 @@ class RankedNodesLogger():
                 node_text = node_text[:100] + "..."
             print(f"  Content: {node_text}")
         
-        if len(reranked_nodes) > 5:
-            print(f"... (and {len(reranked_nodes) - 5} more nodes)")
+        if len(reranked_nodes) > 10:
+            print(f"... (and {len(reranked_nodes) - 10} more nodes)")
         
         print("=== END OF RERANKED NODES ===\n")
         
         return reranked_nodes
+
 
 def load_data(directory_path):
     documents1 = []
@@ -823,12 +804,12 @@ def creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_m
                 # Create retrievers for markdowns with limited retrieval counts
                 vector_retriever_markdown = VectorIndexRetriever(
                     index=vector_index_markdown, 
-                    similarity_top_k=10,  
-                    vector_store_kwargs={"search_kwargs": {"search_type": "similarity", "k": 10}}
+                    similarity_top_k=20,  # Reduced from 30
+                    vector_store_kwargs={"search_kwargs": {"search_type": "similarity", "k": 20}}
                 )
                 keyword_retriever_markdown = KeywordTableSimpleRetriever(
                     index=keyword_index_markdown, 
-                    similarity_top_k=10 
+                    similarity_top_k=15  # Reduced from 25
                 )
                 
                 hybrid_retriever_markdown = CustomRetriever(
@@ -983,10 +964,10 @@ def create_isolated_agent(tools):
     top_k=30, 
     base_url=OLLAMA_BASE_URL,
     cache=False,
-    client_kwargs={"timeout": 120})    
+    client_kwargs={"timeout": 700})    
     prompt = hub.pull("intern/ask10")
     agent = create_react_agent(llm=llm, tools=tools, prompt=prompt)
-    agent_executer = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True, max_iterations=2, max_execution_time=None, 
+    agent_executer = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True, max_iterations=3, max_execution_time=None, 
                                    callbacks=[StreamingStdOutCallbackHandler()], return_intermediate_steps=True, early_stopping_method='force')
     return agent_executer
 
@@ -3661,20 +3642,20 @@ async def chat(request: Request):
             return StreamingResponse(generate_connector_selection(), media_type="text/plain")
         else:
             async def generate_response():
-                start_time = time.time()
                 try:
-                    print(f"Starting agent execution at {start_time}")
+                    # Reset the source tracker for this query
                     source_tracker = SourceTracker()
                     source_tracker.reset()
+                    
+                    # Execute agent with timeout
                     response = await asyncio.wait_for(
                         agent_with_chat_history.ainvoke({
                             "input": user_input,
                             "chat_history": formatted_chat_history
                         }),
-                        timeout=600
+                        timeout=240
                     )
-                    end_time = time.time()
-                    print(f"Agent execution completed in {end_time - start_time:.2f} seconds")
+                    
                     print(f"Agent response type: {type(response)}")
                     print(f"Agent response keys: {response.keys() if isinstance(response, dict) else 'Not a dict'}")
                     
@@ -3824,8 +3805,6 @@ async def chat(request: Request):
                     return_agent(agent_with_chat_history)
                     
                 except asyncio.TimeoutError:
-                    end_time = time.time()
-                    print(f"Agent execution timed out after {end_time - start_time:.2f} seconds")
                     error_message = "The request timed out. Please try again with a simpler question."
                     print(f"Timeout error in generate_response")
                     session_history.add_message(AIMessage(content=error_message))
