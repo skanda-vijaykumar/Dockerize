@@ -108,8 +108,8 @@ deploy:
             - ./postgres-init.sql:/docker-entrypoint-initdb.d/init.sql
           healthcheck:
             test: ["CMD-SHELL", "pg_isready -U postgres"]
-            interval: 10s
-            timeout: 5s
+            interval: 60s
+            timeout: 60s
             retries: 5
             
         ollama:
@@ -134,8 +134,8 @@ deploy:
           #   - NVIDIA_VISIBLE_DEVICES=all
           healthcheck:
             test: ["CMD-SHELL", "curl --silent http://localhost:11434/api/tags >/dev/null 2>&1 || exit 1"]
-            interval: 30s
-            timeout: 15s
+            interval: 60s
+            timeout: 60s
             retries: 10
             start_period: 120s
             
@@ -152,8 +152,8 @@ deploy:
               condition: service_started
           healthcheck:
             test: ["CMD-SHELL", "curl --fail --silent http://localhost:8000/health || exit 1"]
-            interval: 30s
-            timeout: 10s
+            interval: 60s
+            timeout: 60s
             retries: 20
             start_period: 600s
           environment:
