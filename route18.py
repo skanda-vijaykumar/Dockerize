@@ -957,11 +957,11 @@ def creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_m
 def create_isolated_agent(tools):
     llm = ChatOllama(
     model="qwen3:4b", 
-    temperature=0.0, 
-    disable_streaming=False,
+    temperature=0.2, 
+    disable_streaming=False,    
     num_ctx=8152, 
-    top_p=0.7, 
-    top_k=30, 
+    top_p=0.85, 
+    top_k=12, 
     base_url=OLLAMA_BASE_URL,
     cache=False,
     client_kwargs={"timeout": 700})    
@@ -976,12 +976,10 @@ def create_isolated_agent(tools):
 # def get_worker_llm():
 #     worker_id = os.getpid()
 #     if worker_id not in _worker_llm_cache:
-#         _worker_llm_cache[worker_id] = ChatOllama(
-#             model="qwen3:4b",
+#         _worker_llm_cache[worker_id] = ChatOllama(model="qwen3:4b",
 #             temperature=0.01,
 #             num_ctx=6000,
-#             client_id=f"worker-{worker_id}"
-#         )
+#             client_id=f"worker-{worker_id}")
 #     return _worker_llm_cache[worker_id]
 
 # Function to get an agent from the pool
@@ -1036,11 +1034,11 @@ class LLMConnectorSelector:
         ## Chatmodel
         self.llm = ChatOllama(
     model="qwen3:4b", 
-    temperature=0.0, 
+    temperature=0.2, 
     disable_streaming=False,
     num_ctx=8152, 
-    top_p=0.7, 
-    top_k=30, 
+    top_p=0.85, 
+    top_k=12, 
     base_url=OLLAMA_BASE_URL,
     cache=False,
     client_kwargs={"timeout": 700})  
@@ -3710,11 +3708,11 @@ async def chat(request: Request):
                             
                             llm = ChatOllama(
                                 model="qwen3:4b", 
-                                temperature=0.0, 
+                                temperature=0.2, 
                                 disable_streaming=False,
                                 num_ctx=8152, 
-                                top_p=0.7, 
-                                top_k=30, 
+                                top_p=0.85, 
+                                top_k=12, 
                                 base_url=OLLAMA_BASE_URL,
                                 cache=False,
                                 client_kwargs={"timeout": 700}
@@ -3754,7 +3752,8 @@ async def chat(request: Request):
                         
                         # Clean up final answer
                         final_answer = final_answer.replace("Final Answer:", "").strip()
-                        
+                        # Store in session history
+                        session_history.add_message(AIMessage(content=final_answer))
                         # Add source links if catalog or lab tools were used
                         if "Nicomatic_connector_catalogue" in used_tools or "Nicomatic_lab_tests" in used_tools:
                             source_nodes = source_tracker.get_source_nodes() 
@@ -3787,9 +3786,6 @@ async def chat(request: Request):
                         
                         print(f"Final answer length: {len(final_answer)} chars")
                         print(f"Final answer preview: {final_answer[:200]}...")
-                        
-                        # Store in session history
-                        session_history.add_message(AIMessage(content=final_answer))
                         
                         # Yield the response
                         yield final_answer 
