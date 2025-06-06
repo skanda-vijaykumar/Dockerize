@@ -10,13 +10,6 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: aspirine13z
       POSTGRES_DB: alexis
-      # Performance optimizations
-      POSTGRES_SHARED_BUFFERS: 256MB
-      POSTGRES_EFFECTIVE_CACHE_SIZE: 1GB
-      POSTGRES_MAINTENANCE_WORK_MEM: 64MB
-      POSTGRES_CHECKPOINT_COMPLETION_TARGET: 0.9
-      POSTGRES_WAL_BUFFERS: 16MB
-      POSTGRES_DEFAULT_STATISTICS_TARGET: 100
       # ADD: Database timeout settings
       POSTGRES_STATEMENT_TIMEOUT: 600000    
       POSTGRES_LOCK_TIMEOUT: 300000        
@@ -76,32 +69,26 @@ services:
             - driver: nvidia
               count: all
               capabilities: [gpu, compute, utility]
-        # Remove CPU/memory limits to use full server resources
     environment:
-      # GPU optimization settings
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      # Ollama performance settings
       - OLLAMA_NUM_PARALLEL=2        
       - OLLAMA_MAX_LOADED_MODELS=2     
       - OLLAMA_FLASH_ATTENTION=1       
       - OLLAMA_GPU_LAYERS=999          
       - OLLAMA_KEEP_ALIVE=24h         
-      # Memory settings
       - OLLAMA_MAX_VRAM=0            
       - OLLAMA_REQUEST_TIMEOUT=1800
-      - OLLAMA_LOAD_TIMEOUT=600
+      - OLLAMA_LOAD_TIMEOUT=900
     healthcheck:
       test: ["CMD-SHELL", "curl --fail --silent --max-time 30 http://localhost:11434/api/tags || exit 1"]
-      interval: 60s          
-      timeout: 60s          
+      interval: 120s          
+      timeout: 120s          
       retries: 5
       start_period: 240s     
-    # Use all available resources
     privileged: true
     shm_size: 2gb
-    # ADD: Stop timeout configuration
-    stop_grace_period: 60s
+    stop_grace_period: 120s
 
   # Application with maximum resource allocation
   app:
@@ -127,7 +114,6 @@ services:
         reservations:
           cpus: '2'
           memory: 2G
-        # No limits - use all available resources
     environment:
       - POSTGRES_HOST=postgres
       - POSTGRES_USER=postgres
@@ -144,19 +130,16 @@ services:
       - OMP_NUM_THREADS=8             
       - MKL_NUM_THREADS=8             
       - TORCH_NUM_THREADS=8            
-      # UPDATED: Extended timeouts for compute-intensive operations
       - AGENT_TIMEOUT=900              
       - LLM_TIMEOUT=600               
       - SYNTHESIS_TIMEOUT=600        
       - MAX_AGENTS=8  
       - OLLAMA_NUM_PARALLEL=4     
       - OLLAMA_MAX_LOADED_MODELS=3
-      # ADD: Additional timeout configurations
       - DATABASE_TIMEOUT=600      
       - STREAMING_TIMEOUT=900        
       - UVICORN_TIMEOUT_KEEP_ALIVE=900 
       - UVICORN_TIMEOUT_GRACEFUL_SHUTDOWN=60 
-      # ADD: FastAPI/Uvicorn timeout settings
       - FASTAPI_TIMEOUT=900           
       - HTTP_TIMEOUT=900               
     healthcheck:
