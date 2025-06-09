@@ -381,11 +381,9 @@ class RankedNodesLogger():
         super().__init__()
         
     def postprocess_nodes(self, nodes, query_bundle):
-        # Limit the number of nodes before reranking to improve performance
-        max_nodes_to_rerank = 30
+        max_nodes_to_rerank = 15  
         if len(nodes) > max_nodes_to_rerank:
             print(f"Limiting from {len(nodes)} to {max_nodes_to_rerank} nodes before reranking")
-            # Sort by score before limiting, to make sure we get the best ones
             nodes = sorted(nodes, key=lambda x: x.score if hasattr(x, 'score') else 0.0, reverse=True)[:max_nodes_to_rerank]
         
         # Pass nodes through the underlying reranker
@@ -393,10 +391,10 @@ class RankedNodesLogger():
             reranked_nodes = self.reranker.postprocess_nodes(nodes, query_bundle)
         except Exception as e:
             print(f"Error during reranking: {str(e)}. Falling back to original nodes.")
-            reranked_nodes = nodes[:min(15, len(nodes))]  # Limit to 15 nodes as a fallback
+            reranked_nodes = nodes[:min(8, len(nodes))] 
         
-        # Limit the number of nodes returned after reranking
-        max_nodes_to_return = 15
+        # Limit final nodes even more aggressively
+        max_nodes_to_return = 8 
         if len(reranked_nodes) > max_nodes_to_return:
             print(f"Limiting from {len(reranked_nodes)} to {max_nodes_to_return} nodes after reranking")
             reranked_nodes = reranked_nodes[:max_nodes_to_return]
@@ -407,26 +405,22 @@ class RankedNodesLogger():
         
         # Add all sources to the global tracker
         self.source_tracker.add_sources_from_nodes(reranked_nodes)
-        
-        # Only log a subset of nodes to reduce console output
-        for i, node in enumerate(reranked_nodes[:10]):  # Only log top 10 for clarity
+        for i, node in enumerate(reranked_nodes[:5]): 
             source = node.node.metadata.get("source", "Unknown")
             connector_family = node.node.metadata.get("connector_family", "Unknown")
             file_type = node.node.metadata.get("file_type", "Unknown")
             score = node.score if hasattr(node, 'score') else "N/A"
-            absolute_path = node.node.metadata.get("absolute_path", "Unknown path")
             
             print(f"Node {i+1}: {source} | Family: {connector_family} | Type: {file_type} | Score: {score}")
-            print(f"  Path: {absolute_path}")
             
-            # First few characters of content for context
+            # Reduce content preview for less output
             node_text = node.node.text.replace('\n', ' ')
-            if len(node_text) > 100:
-                node_text = node_text[:100] + "..."
+            if len(node_text) > 50:  
+                node_text = node_text[:50] + "..."
             print(f"  Content: {node_text}")
         
-        if len(reranked_nodes) > 10:
-            print(f"... (and {len(reranked_nodes) - 10} more nodes)")
+        if len(reranked_nodes) > 5:
+            print(f"... (and {len(reranked_nodes) - 5} more nodes)")
         
         print("=== END OF RERANKED NODES ===\n")
         
@@ -804,12 +798,12 @@ def creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_m
                 # Create retrievers for markdowns with limited retrieval counts
                 vector_retriever_markdown = VectorIndexRetriever(
                     index=vector_index_markdown, 
-                    similarity_top_k=20,  # Reduced from 30
-                    vector_store_kwargs={"search_kwargs": {"search_type": "similarity", "k": 20}}
+                    similarity_top_k=12,  
+                    vector_store_kwargs={"search_kwargs": {"search_type": "similarity", "k": 12}}
                 )
                 keyword_retriever_markdown = KeywordTableSimpleRetriever(
                     index=keyword_index_markdown, 
-                    similarity_top_k=15  # Reduced from 25
+                    similarity_top_k=8
                 )
                 
                 hybrid_retriever_markdown = CustomRetriever(
@@ -818,15 +812,11 @@ def creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_m
                     mode="OR"
                 )
                 
-                # Use a lighter reranker that's faster
-                base_reranker = FlagEmbeddingReranker(model="BAAI/bge-reranker-large", top_n=10)
-                
-                # Wrap the reranker with our logger
+                base_reranker = FlagEmbeddingReranker(model="BAAI/bge-reranker-large", top_n=6)
                 reranker = RankedNodesLogger(base_reranker)
                 
-                # Use compact response mode for faster synthesis
                 response_synthesizer = get_response_synthesizer(
-                    response_mode="compact", 
+                    response_mode="tree_summarize", 
                     verbose=True
                 )
                 
@@ -870,13 +860,13 @@ def creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_m
                 # Create retrievers for markdowns for lab files with reduced retrieval counts
                 vector_retriever_markdown_lab = VectorIndexRetriever(
                     index=vector_index_markdown_lab, 
-                    similarity_top_k=20,  # Reduced from 30
-                    vector_store_kwargs={"search_kwargs": {"search_type": "similarity", "k": 20}}
+                    similarity_top_k=12,
+                    vector_store_kwargs={"search_kwargs": {"search_type": "similarity", "k": 12}}
                 )
                 
                 keyword_retriever_markdown_lab = KeywordTableSimpleRetriever(
                     index=keyword_index_markdown_lab, 
-                    similarity_top_k=15  # Reduced from 25
+                    similarity_top_k=8
                 )
                 
                 hybrid_retriever_markdown_lab = CustomRetriever(
@@ -886,12 +876,12 @@ def creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_m
                 )
                 
                 # Use a lightweight reranker
-                base_reranker = FlagEmbeddingReranker(model="BAAI/bge-reranker-large", top_n=10)
+                base_reranker = FlagEmbeddingReranker(model="BAAI/bge-reranker-large", top_n=6)
                 lab_reranker = RankedNodesLogger(base_reranker)
                 
                 # Use compact response mode for faster synthesis
                 response_synthesizer = get_response_synthesizer(
-                    response_mode="compact", 
+                    response_mode="tree_summarize", 
                     verbose=True
                 )
                 
@@ -956,15 +946,20 @@ def creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_m
 # Create an isolated agent with its own LLM instance
 def create_isolated_agent(tools):
     llm = ChatOllama(
-    model="qwen3:4b", 
-    temperature=0.2, 
-    disable_streaming=False,    
-    num_ctx=8152, 
-    top_p=0.85, 
-    top_k=12, 
-    base_url=OLLAMA_BASE_URL,
-    cache=False,
-    client_kwargs={"timeout": 700})    
+        model="qwen3:4b", 
+        temperature=0.2, 
+        disable_streaming=False,    
+        num_ctx=8152, 
+        top_p=0.85, 
+        top_k=12, 
+        base_url=OLLAMA_BASE_URL,
+        cache=False,
+        request_timeout=300.0,
+        client_kwargs={
+            "timeout": 300.0,
+            "follow_redirects": True
+        }
+    ) 
     prompt = hub.pull("intern/ask10")
     agent = create_react_agent(llm=llm, tools=tools, prompt=prompt)
     agent_executer = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True, max_iterations=3, max_execution_time=None, 
@@ -1031,17 +1026,21 @@ def normalize_awg_value(awg_value):
 ## Most Annoying class in existance 
 class LLMConnectorSelector:
     def __init__(self):
-        ## Chatmodel
         self.llm = ChatOllama(
-    model="qwen3:4b", 
-    temperature=0.2, 
-    disable_streaming=False,
-    num_ctx=8152, 
-    top_p=0.85, 
-    top_k=12, 
-    base_url=OLLAMA_BASE_URL,
-    cache=False,
-    client_kwargs={"timeout": 700})  
+        model="qwen3:4b", 
+        temperature=0.2, 
+        disable_streaming=False,    
+        num_ctx=8152, 
+        top_p=0.85, 
+        top_k=12, 
+        base_url=OLLAMA_BASE_URL,
+        cache=False,
+        request_timeout=300.0, 
+        client_kwargs={
+            "timeout": 300.0,
+            "follow_redirects": True
+        }
+    )
         ## Structure for the LLM response
         self.response_schemas = [ResponseSchema(name="value", description="The parsed value from user response"),ResponseSchema(name="confidence", description="Confidence score between 0 and 1"),
                                   ResponseSchema(name="reasoning", description="Explanation of the parsing logic")]
@@ -3707,16 +3706,20 @@ async def chat(request: Request):
                             print("Agent output empty/invalid, synthesizing from tool data...")
                             
                             llm = ChatOllama(
-                                model="qwen3:4b", 
-                                temperature=0.2, 
-                                disable_streaming=False,
-                                num_ctx=8152, 
-                                top_p=0.85, 
-                                top_k=12, 
-                                base_url=OLLAMA_BASE_URL,
-                                cache=False,
-                                client_kwargs={"timeout": 700}
-                            )
+        model="qwen3:4b", 
+        temperature=0.2, 
+        disable_streaming=False,    
+        num_ctx=8152, 
+        top_p=0.85, 
+        top_k=12, 
+        base_url=OLLAMA_BASE_URL,
+        cache=False,
+        request_timeout=300.0, 
+        client_kwargs={
+            "timeout": 300.0,
+            "follow_redirects": True
+        }
+    )
                             
                             llm_prompt = f"""
                             Please provide a helpful response to the user's question based on the information gathered from our systems.
