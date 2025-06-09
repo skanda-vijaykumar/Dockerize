@@ -1,7 +1,6 @@
 version: '3.12'
 
 services:
-  # PostgreSQL Database with optimized settings
   postgres:
     image: postgres:15-alpine
     container_name: nicomatic-postgres
@@ -10,7 +9,6 @@ services:
       POSTGRES_USER: postgres
       POSTGRES_PASSWORD: aspirine13z
       POSTGRES_DB: alexis
-      # ADD: Database timeout settings
       POSTGRES_STATEMENT_TIMEOUT: 600000    
       POSTGRES_LOCK_TIMEOUT: 300000        
       POSTGRES_IDLE_IN_TRANSACTION_SESSION_TIMEOUT: 600000 
@@ -19,7 +17,6 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./postgres-init.sql:/docker-entrypoint-initdb.d/init.sql
-    # Allocate sufficient resources
     deploy:
       resources:
         reservations:
@@ -31,7 +28,7 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres"]
       interval: 60s        
-      timeout: 60s         
+      timeout: 120s         
       retries: 5
       start_period: 30s    
     command: >
@@ -45,10 +42,8 @@ services:
       -c statement_timeout=600000
       -c lock_timeout=300000
       -c idle_in_transaction_session_timeout=600000
-    # ADD: Stop timeout configuration
     stop_grace_period: 30s
 
-  # Ollama LLM Service with full GPU access
   ollama:
     image: ollama/ollama:latest
     container_name: nicomatic-ollama
@@ -57,11 +52,9 @@ services:
       - "11434:11434"
     volumes:
       - ollama_data:/root/.ollama
-      # Mount GPU devices
       - /dev/nvidia0:/dev/nvidia0
       - /dev/nvidiactl:/dev/nvidiactl
       - /dev/nvidia-uvm:/dev/nvidia-uvm
-    # Enable all GPU access
     deploy:
       resources:
         reservations:
@@ -72,25 +65,24 @@ services:
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
-      - OLLAMA_NUM_PARALLEL=2        
-      - OLLAMA_MAX_LOADED_MODELS=2     
+      - OLLAMA_NUM_PARALLEL=1        
+      - OLLAMA_MAX_LOADED_MODELS=1    
       - OLLAMA_FLASH_ATTENTION=1       
       - OLLAMA_GPU_LAYERS=999          
-      - OLLAMA_KEEP_ALIVE=24h         
+      - OLLAMA_KEEP_ALIVE=30m         
       - OLLAMA_MAX_VRAM=0            
-      - OLLAMA_REQUEST_TIMEOUT=1800
-      - OLLAMA_LOAD_TIMEOUT=900
+      - OLLAMA_REQUEST_TIMEOUT=600
+      - OLLAMA_LOAD_TIMEOUT=300
     healthcheck:
       test: ["CMD-SHELL", "curl --fail --silent --max-time 30 http://localhost:11434/api/tags || exit 1"]
       interval: 120s          
       timeout: 120s          
-      retries: 5
+      retries: 3
       start_period: 240s     
     privileged: true
     shm_size: 2gb
     stop_grace_period: 120s
 
-  # Application with maximum resource allocation
   app:
     build:
       context: .
@@ -108,7 +100,6 @@ services:
         condition: service_healthy
       ollama:
         condition: service_started
-    # Remove resource limits - use full server capacity
     deploy:
       resources:
         reservations:
@@ -124,7 +115,6 @@ services:
       - TAVILY_API_KEY=${TAVILY_API_KEY}
       - SERPER_API_KEY=${SERPER_API_KEY}
       - DATA_DIR=/app/extracted_best
-      # Performance optimization settings
       - PYTHONUNBUFFERED=1
       - PYTHONDONTWRITEBYTECODE=1
       - OMP_NUM_THREADS=8             
@@ -133,9 +123,9 @@ services:
       - AGENT_TIMEOUT=900              
       - LLM_TIMEOUT=600               
       - SYNTHESIS_TIMEOUT=600        
-      - MAX_AGENTS=8  
-      - OLLAMA_NUM_PARALLEL=4     
-      - OLLAMA_MAX_LOADED_MODELS=3
+      - MAX_AGENTS=4 
+      - OLLAMA_NUM_PARALLEL=1     
+      - OLLAMA_MAX_LOADED_MODELS=1
       - DATABASE_TIMEOUT=600      
       - STREAMING_TIMEOUT=900        
       - UVICORN_TIMEOUT_KEEP_ALIVE=900 
@@ -145,18 +135,15 @@ services:
     healthcheck:
       test: ["CMD-SHELL", "curl --fail --silent --max-time 30 http://localhost:8000/health || exit 1"]
       interval: 60s          
-      timeout: 60s           
+      timeout: 600s           
       retries: 3
       start_period: 180s     
     shm_size: 1gb
-    # Security settings for GPU access
     security_opt:
       - seccomp:unconfined
-    # ADD: Stop timeout configuration
-    stop_grace_period: 60s
+    stop_grace_period: 120s
     stop_signal: SIGTERM
 
-  # Model Initialization with GPU verification
   model-init:
     image: curlimages/curl:latest
     container_name: model-initializer
@@ -179,12 +166,10 @@ services:
         echo "Checking GPU availability..."
         curl -s --max-time 30 http://ollama:11434/api/ps || echo "Could not check GPU status"
         
-        # Pull models with extended timeouts
         echo "Pulling qwen3:4b model (this may take 30+ minutes on first run)..."
         if check_model "qwen3:4b"; then
           echo "qwen3:4b model already exists, skipping download"
         else
-          # UPDATED: Added reasonable timeout for model pulls
           timeout 3600 curl -X POST --max-time 3600 http://ollama:11434/api/pull -d '{"name":"qwen3:4b"}' || echo "qwen3:4b pull failed or timed out"
         fi
         
@@ -205,7 +190,6 @@ volumes:
   postgres_data:
   ollama_data:
 
-# UPDATED: Optimize network for better container communication with timeout settings
 networks:
   default:
     driver: bridge
