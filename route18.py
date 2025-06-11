@@ -63,8 +63,6 @@ from functools import lru_cache
 import urllib.parse
 
 ## Necessary declaration and initialization of API keys
-TAVILY_API_KEY = "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"
-SERPER_API_KEY = "a49f2db4b8df6ffba254aacc9a7d4dded2f50c1c"
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
 serper_client = GoogleSerperAPIWrapper(serper_api_key=SERPER_API_KEY) 
 ddg_search = DuckDuckGoSearchAPIWrapper()
@@ -98,7 +96,6 @@ os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_API_KEY"] = "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"
 os.environ["LANGCHAIN_PROJECT"] = "SQL_memory"
 os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
-NICOMIND_API_KEY = os.getenv("NICOMIND_API_KEY", "eKQduRkL3J0Fc2hvtJPbRjirNj26nIclgEIVNd")
 NICOMIND_BASE_URL = "https://api.nicomind.com" 
 
 ## Global variables to hold data
