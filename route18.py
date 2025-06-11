@@ -82,8 +82,6 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres") 
 POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
-POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "aspirine13z")
-POSTGRES_DB = os.getenv("POSTGRES_DB", "test1")
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "ollama") 
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
@@ -93,7 +91,6 @@ load_dotenv()
 os.environ["SERPER_API_KEY"] = SERPER_API_KEY
 os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
-os.environ["LANGCHAIN_API_KEY"] = "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"
 os.environ["LANGCHAIN_PROJECT"] = "SQL_memory"
 os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
 NICOMIND_BASE_URL = "https://api.nicomind.com" 
