@@ -63,6 +63,8 @@ from functools import lru_cache
 import urllib.parse
 
 ## Necessary declaration and initialization of API keys
+TAVILY_API_KEY = "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"
+SERPER_API_KEY = "a49f2db4b8df6ffba254aacc9a7d4dded2f50c1c"
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
 serper_client = GoogleSerperAPIWrapper(serper_api_key=SERPER_API_KEY) 
 ddg_search = DuckDuckGoSearchAPIWrapper()
@@ -82,6 +84,8 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres") 
 POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "aspirine13z")
+POSTGRES_DB = os.getenv("POSTGRES_DB", "test1")
 
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "ollama") 
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
@@ -91,9 +95,9 @@ load_dotenv()
 os.environ["SERPER_API_KEY"] = SERPER_API_KEY
 os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
+os.environ["LANGCHAIN_API_KEY"] = "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"
 os.environ["LANGCHAIN_PROJECT"] = "SQL_memory"
 os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
-NICOMIND_BASE_URL = "https://api.nicomind.com" 
 
 ## Global variables to hold data
 vector_index_markdown = None
@@ -535,7 +539,7 @@ def processing_data(documents1, documents3):
 
         ## Settings
         print("Initializing language model and embedding model...")
-        Settings.llm = Ollama(model="gemma3:27b-16k-ctx", temperature=0.0, num_ctx=8012, top_p=0.5, request_timeout=700, thinking=True,base_url=OLLAMA_BASE_URL)
+        Settings.llm = Ollama(model="qwen3:4b", temperature=0.0, num_ctx=8012, top_p=0.5, request_timeout=700, thinking=True,base_url=OLLAMA_BASE_URL)
         Settings.embed_model = OllamaEmbeddings(model="nomic-embed-text", base_url=OLLAMA_BASE_URL)
         
         print("Creating storage contexts...")
@@ -952,18 +956,15 @@ def creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_m
 # Create an isolated agent with its own LLM instance
 def create_isolated_agent(tools):
     llm = ChatOllama(
-    model="gemma3:27b-16k-ctx", 
-    temperature=0.1, 
-    disable_streaming=True,    
+    model="qwen3:4b", 
+    temperature=0.2, 
+    disable_streaming=False,    
     num_ctx=8152, 
     top_p=0.85, 
     top_k=12, 
-    base_url=NICOMIND_BASE_URL,
+    base_url=OLLAMA_BASE_URL,
     cache=False,
-    client_kwargs={"timeout": 700,
-    "headers": {  
-            "Authorization": f"Bearer {NICOMIND_API_KEY}"
-        }})    
+    client_kwargs={"timeout": 700})    
     prompt = hub.pull("intern/ask10")
     agent = create_react_agent(llm=llm, tools=tools, prompt=prompt)
     agent_executer = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True, max_iterations=3, max_execution_time=None, 
@@ -975,7 +976,7 @@ def create_isolated_agent(tools):
 # def get_worker_llm():
 #     worker_id = os.getpid()
 #     if worker_id not in _worker_llm_cache:
-#         _worker_llm_cache[worker_id] = ChatOllama(model="gemma3:27b-16k-ctx",
+#         _worker_llm_cache[worker_id] = ChatOllama(model="qwen3:4b",
 #             temperature=0.01,
 #             num_ctx=6000,
 #             client_id=f"worker-{worker_id}")
@@ -1000,7 +1001,7 @@ def return_agent(agent):
 
 # def get_llm():
 #     return ChatOllama(
-#         model="gemma3:27b-16k-ctx",
+#         model="qwen3:4b",
 #         temperature=0.01,
 #         num_ctx=8126,
 #         cache=False,
@@ -1032,18 +1033,15 @@ class LLMConnectorSelector:
     def __init__(self):
         ## Chatmodel
         self.llm = ChatOllama(
-            model="gemma3:27b-16k-ctx", 
-            temperature=0.1, 
-            disable_streaming=True,
+            model="qwen3:4b", 
+            temperature=0.2, 
+            disable_streaming=False,
             num_ctx=8152, 
             top_p=0.85, 
             top_k=12, 
-            base_url=NICOMIND_BASE_URL,
+            base_url=OLLAMA_BASE_URL,
             cache=False,
-            client_kwargs={"timeout": 700,
-    "headers": {  
-            "Authorization": f"Bearer {NICOMIND_API_KEY}"
-        }})   
+            client_kwargs={"timeout": 700})  
         ## Structure for the LLM response
         self.response_schemas = [ResponseSchema(name="value", description="The parsed value from user response"),ResponseSchema(name="confidence", description="Confidence score between 0 and 1"),
                                   ResponseSchema(name="reasoning", description="Explanation of the parsing logic")]
@@ -3417,10 +3415,7 @@ async def chat(request: Request):
         agent_with_chat_history = await get_agent(tools)
         session_history.add_message(HumanMessage(content=user_input))
 
-        llm = ChatOllama(model="gemma3:27b-16k-ctx", temperature=0.0, num_ctx=8152, cache=False, format="json",base_url=NICOMIND_BASE_URL,client_kwargs={"timeout": 700,
-    "headers": {  
-            "Authorization": f"Bearer {NICOMIND_API_KEY}"
-        }})
+        llm = ChatOllama(model="qwen3:4b", temperature=0.0, num_ctx=8152, cache=False, format="json",base_url=OLLAMA_BASE_URL)
         
         print("Routing your query now")
         ## Routing query to either general or selection
@@ -3656,7 +3651,7 @@ async def chat(request: Request):
                             "input": user_input,
                             "chat_history": formatted_chat_history
                         }),
-                        timeout=240
+                        timeout=700
                     )
                     
                     print(f"Agent response type: {type(response)}")
@@ -3712,20 +3707,15 @@ async def chat(request: Request):
                             print("Agent output empty/invalid, synthesizing from tool data...")
                             
                             llm = ChatOllama(
-                                model="gemma3:27b-16k-ctx", 
-                                temperature=0.1, 
-                                disable_streaming=True,
+                                model="qwen3:4b", 
+                                temperature=0.2, 
+                                disable_streaming=False,
                                 num_ctx=8152, 
                                 top_p=0.85, 
                                 top_k=12, 
-                                base_url=NICOMIND_BASE_URL,
+                                base_url=OLLAMA_BASE_URL,
                                 cache=False,
-                                client_kwargs={
-        "timeout": 700,
-        "headers": { 
-            "Authorization": f"Bearer {NICOMIND_API_KEY}"
-        }
-    }
+                                client_kwargs={"timeout": 700}
                             )
                             
                             llm_prompt = f"""
