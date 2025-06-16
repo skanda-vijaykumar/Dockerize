@@ -61,6 +61,7 @@ import threading
 import queue
 from functools import lru_cache
 import urllib.parse
+from llama_index.llms.langchain import LangChainLLM
 
 ## Necessary declaration and initialization of API keys
 TAVILY_API_KEY = "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"
@@ -98,6 +99,8 @@ os.environ["LANGCHAIN_TRACING_V2"] = "true"
 os.environ["LANGCHAIN_API_KEY"] = "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"
 os.environ["LANGCHAIN_PROJECT"] = "SQL_memory"
 os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
+NICOMIND_API_KEY = os.getenv("NICOMIND_API_KEY", "eKQduRkL3J0Fc2hvtJPbRjirNj26nIclgEIVNd")
+NICOMIND_BASE_URL = "https://api.nicomind.com" 
 
 ## Global variables to hold data
 vector_index_markdown = None
@@ -113,6 +116,572 @@ agent_pool = None
 agent_lock = threading.Lock()
 agent_queue = queue.Queue()
 MAX_AGENTS = 4
+
+from typing import List, Dict, Any, Optional, Type
+from langchain.tools import BaseTool
+from langchain.memory import ConversationBufferMemory
+import re
+import json
+
+class ConversationAwarePartNumberTool(BaseTool):
+    name: str = "cmm_part_numbering_smart"
+    description: str = """
+    SMART CMM Part Numbering Tool - Context-aware and conversation-intelligent.
+    
+    Use this tool when users:
+    - Ask about part number meanings/decoding (e.g., "What does 221Y20F24 mean?")
+    - Want to generate part numbers (e.g., "I need a part number", "generate CMM part number")
+    - Ask part numbering questions (e.g., "How do CMM codes work?")
+    
+    This tool automatically reviews conversation history to avoid re-asking questions.
+    Input should be the user's question or part number to decode.
+    """
+    return_direct: bool = False
+    
+    def __init__(self, conversation_history: str = ""):
+        super().__init__()
+        # Use PRIVATE attributes (with underscore) to avoid Pydantic validation
+        self._conversation_history = conversation_history
+        self._extracted_requirements = {}
+        self._series_data = {}
+        self._termination_styles = {}
+        self._initialize_data()
+        self._extract_requirements_from_history()
+    
+    def _initialize_data(self):
+        """Initialize the part numbering rules and data"""
+        self._series_data = {
+            '10': {
+                'name': 'CMM 100',
+                'description': '1 row connector for basic applications',
+                'contact_range': '02-25',
+                'contact_rule': 'Any number from 2 to 25',
+                'supports_hfhp': False,
+                'formula': lambda n: f"A = ({n} × 2) - 2 = {(n * 2) - 2}mm"
+            },
+            '20': {
+                'name': 'CMM 200', 
+                'description': '2 rows connector for higher density',
+                'contact_range': '04-50 (even)',
+                'contact_rule': 'Even numbers from 4 to 50',
+                'supports_hfhp': False,
+                'formula': lambda n: f"A = {n} - 2 = {n - 2}mm, B = A + 5 = {(n - 2) + 5}mm"
+            },
+            '22': {
+                'name': 'CMM 220',
+                'description': '2 rows with mixed-layout support (HF/HP)',
+                'contact_range': '04-60 (even) or 00 (special)',
+                'contact_rule': 'Even numbers from 4 to 60, or 00 for special mixed-layout',
+                'supports_hfhp': True,
+                'max_hf_hp': 15,
+                'formula': lambda n, hf=0, hp=0: f"A = {n} - 2 = {n - 2}mm, B = ({hf}+{hp})×4 + A + 7 = {(hf + hp) * 4 + (n - 2) + 7}mm"
+            },
+            '32': {
+                'name': 'CMM 320',
+                'description': '2 rows, 006-120 contacts with mixed-layout support',
+                'contact_range': '006-120 (multiples of 3) or 000 (special)',
+                'contact_rule': 'Multiples of 3 from 6 to 120, or 000 for special mixed-layout',
+                'supports_hfhp': True,
+                'max_hf_hp': 20,
+                'formula': lambda n: f"A = {n} × 2/3 - 2 = {int(n * 2/3) - 2}mm"
+            },
+            '34': {
+                'name': 'CMM 340',
+                'description': '2 rows, 006-120 contacts with mixed-layout support',
+                'contact_range': '006-120 (multiples of 3) or 000 (special)',
+                'contact_rule': 'Multiples of 3 from 6 to 120, or 000 for special mixed-layout',
+                'supports_hfhp': True,
+                'max_hf_hp': 20,
+                'formula': lambda n: f"A = {n} × 2/3 - 2 = {int(n * 2/3) - 2}mm"
+            }
+        }
+        
+        self._termination_styles = {
+            'Y': {
+                'name': 'Straight PCB',
+                'description': 'Through-hole PCB mounting',
+                'length': '3mm',
+                'pcb_thickness': '0.8-2mm',
+                'valid_for': {'gender': ['1', '2'], 'series': ['10', '20', '22', '32', '34']}
+            },
+            'YL': {
+                'name': 'Straight PCB Long',
+                'description': 'Through-hole PCB mounting, longer pins',
+                'length': '4.5mm',
+                'pcb_thickness': '1.5-4mm',
+                'valid_for': {'gender': ['1', '2'], 'series': ['22', '32', '34']}
+            },
+            'V': {
+                'name': '90° PCB',
+                'description': 'Right-angle PCB mounting',
+                'length': '3mm',
+                'pcb_thickness': '0.8-2mm',
+                'valid_for': {'gender': ['1'], 'series': ['22', '32', '34']}
+            },
+            'VL': {
+                'name': '90° PCB Long',
+                'description': 'Right-angle PCB mounting, longer pins',
+                'length': '4.5mm',
+                'pcb_thickness': '1.5-4mm',
+                'valid_for': {'gender': ['1'], 'series': ['22', '32', '34']}
+            },
+            'T': {
+                'name': 'Solder Termination',
+                'description': 'Through-hole solder termination',
+                'valid_for': {'gender': ['2'], 'series': ['22', '32', '34']}
+            },
+            'S': {
+                'name': 'Crimp',
+                'description': 'Crimp termination for cable',
+                'wire_gauge': 'AWG 24-28',
+                'valid_for': {'gender': ['2'], 'series': ['10', '20', '22', '32', '34']}
+            },
+            'C': {
+                'name': 'Crimp',
+                'description': 'Crimp termination for cable',
+                'wire_gauge': 'AWG 22',
+                'valid_for': {'gender': ['2'], 'series': ['10', '20', '22', '32', '34']}
+            },
+            'D': {
+                'name': 'Special Mixed-Layout',
+                'description': 'For HF/HP contacts only (no LF)',
+                'valid_for': {'gender': ['1', '2'], 'series': ['22', '32', '34']}
+            },
+            'PF': {
+                'name': 'Press-Fit',
+                'description': 'Press-fit PCB mounting',
+                'valid_for': {'gender': ['2'], 'series': ['10', '20']}
+            },
+            'R': {
+                'name': 'SMT 90°',
+                'description': 'Surface mount 90° termination',
+                'valid_for': {'gender': ['2'], 'series': ['10', '20']}
+            }
+        }
+
+    def _extract_requirements_from_history(self):
+        if not self._conversation_history:
+            return
+            
+        history_lower = self._conversation_history.lower()
+        
+        series_patterns = {
+            '10': ['cmm 100', '100 series', 'series 10', 'cmm100', 'cmm-100'],
+            '20': ['cmm 200', '200 series', 'series 20', 'cmm200', 'cmm-200'], 
+            '22': ['cmm 220', '220 series', 'series 22', 'cmm220', 'cmm-220', 'cmm220 series'],
+            '32': ['cmm 320', '320 series', 'series 32', 'cmm320', 'cmm-320'],
+            '34': ['cmm 340', '340 series', 'series 34', 'cmm340', 'cmm-340']
+        }
+        
+        for series, patterns in series_patterns.items():
+            if any(pattern in history_lower for pattern in patterns):
+                self._extracted_requirements['series'] = series
+                print(f"DEBUG: Extracted series {series} from conversation history")
+                break
+        
+        # Enhanced contact count extraction with multiple patterns
+        contact_patterns = [
+            r'(\d+)\s*(?:contacts?|pins?|position)',
+            r'need\s*(?:about\s*)?(\d+)',
+            r'require\s*(\d+)',
+            r'(\d+)\s*(?:contact|pin|way)',
+            r'(?:with|have|using)\s*(\d+)',
+            r'about\s*(\d+)\s*(?:contacts?|pins?)'  # NEW: Handle "about 20 contacts"
+        ]
+        
+        for pattern in contact_patterns:
+            matches = re.findall(pattern, history_lower)
+            if matches:
+                # Take the most recent/largest reasonable number
+                contact_count = max([int(m) for m in matches if 2 <= int(m) <= 120])
+                self._extracted_requirements['contact_count'] = str(contact_count)
+                print(f"DEBUG: Extracted contact count {contact_count} from conversation history")
+                break
+   
+        # Extract gender
+        if re.search(r'\bmale\b(?!\s*(?:and|or)\s*female)', history_lower):
+            self._extracted_requirements['gender'] = '1'
+        elif re.search(r'\bfemale\b(?!\s*(?:and|or)\s*male)', history_lower):
+            self._extracted_requirements['gender'] = '2'
+        
+        # Extract application/mounting type
+        mounting_keywords = {
+            'pcb': 'pcb_mount',
+            'board': 'pcb_mount',
+            'cable': 'cable_mount',
+            'wire': 'cable_mount',
+            'solder': 'solder',
+            'crimp': 'crimp',
+            '90': 'right_angle',
+            'right angle': 'right_angle',
+            'straight': 'straight',
+            'smt': 'smt',
+            'surface mount': 'smt'
+        }
+        
+        for keyword, app_type in mounting_keywords.items():
+            if keyword in history_lower:
+                self._extracted_requirements['application'] = app_type
+                break
+        
+        # Extract HF/HP requirements
+        if 'high frequency' in history_lower or 'hf' in history_lower:
+            self._extracted_requirements['needs_hf'] = True
+        if 'high power' in history_lower or 'hp' in history_lower:
+            self._extracted_requirements['needs_hp'] = True
+        
+        # Extract power/current requirements
+        power_patterns = [
+            r'(\d+(?:\.\d+)?)\s*(?:amp|a|ampere)',
+            r'(\d+(?:\.\d+)?)\s*(?:watt|w)',
+            r'(\d+(?:\.\d+)?)\s*(?:volt|v)'
+        ]
+        
+        for pattern in power_patterns:
+            match = re.search(pattern, history_lower)
+            if match:
+                value = float(match.group(1))
+                if value >= 10:  # Likely needs HP contacts
+                    self._extracted_requirements['needs_hp'] = True
+                break
+
+    def _run(self, query: str) -> str:
+        """Main entry point for the tool"""
+        query = query.strip()
+        
+        # Determine the intent
+        if self._is_part_number(query):
+            return self._decode_part_number(query)
+        elif self._is_generation_request(query):
+            return self._handle_generation_request(query)
+        elif self._is_question_response(query):
+            return self._handle_question_response(query)
+        else:
+            return self._provide_contextual_help(query)
+
+    def _is_part_number(self, text: str) -> bool:
+        text_clean = text.upper().replace('-', '').replace(' ', '')
+        # Match CMM part number patterns more precisely
+        patterns = [
+            r'^(10|20|22|32|34)[12][A-Z]+\d+',  
+            r'(10|20|22|32|34)[12][A-Z]+\d+.*', 
+        ]
+        return any(re.search(pattern, text_clean) for pattern in patterns)
+
+    def _is_generation_request(self, text: str) -> bool:
+        generation_keywords = [
+            'generate', 'create', 'build', 'need', 'want', 'require',
+            'part number', 'partnumber', 'p/n', 'pn'
+        ]
+        return any(keyword in text.lower() for keyword in generation_keywords)
+
+    def _is_question_response(self, text: str) -> bool:
+        """Check if this is a response to our question"""
+        # Simple heuristics - in real implementation, you'd track conversation state
+        response_patterns = [
+            r'^\d+$',  # Just a number
+            r'^(male|female)$',  # Gender response
+            r'^[A-Z]+$',  # Termination code
+            r'^(yes|no)$',  # Yes/no response
+        ]
+        return any(re.match(pattern, text.strip(), re.IGNORECASE) for pattern in response_patterns)
+
+    def _validate_contact_count(self, series: str, count: int) -> bool:
+        """Validate contact count for given series"""
+        if series == '10':
+            return 2 <= count <= 25
+        elif series == '20':
+            return 4 <= count <= 50 and count % 2 == 0
+        elif series == '22':
+            return count == 0 or (4 <= count <= 60 and count % 2 == 0)
+        elif series in ['32', '34']:
+            return count == 0 or (6 <= count <= 120 and count % 3 == 0)
+        return False
+
+    def _decode_part_number(self, part_number: str) -> str:
+        original_pn = part_number
+        pn = part_number.upper().replace('-', '').replace(' ', '')
+        
+        try:
+            if len(pn) < 4:
+                return f"❌ Part number too short: {original_pn}"
+                
+            series = pn[:2]
+            gender = pn[2]
+            termination = pn[3]
+            
+            print(f"DEBUG: Parsing '{original_pn}' -> series='{series}', gender='{gender}', termination='{termination}'")
+            
+            # Validate series
+            if series not in self._series_data:
+                return f"❌ Invalid series code '{series}'. Valid codes: {', '.join(self._series_data.keys())}"
+            
+            # Parse contact count
+            if series in ['32', '34']:
+                if len(pn) < 7:
+                    return f"❌ Part number too short for series {series}"
+                contact_count = pn[4:7]
+                next_pos = 7
+            else:
+                if len(pn) < 6:
+                    return f"❌ Part number too short for series {series}"
+                contact_count = pn[4:6]
+                next_pos = 6
+            # Build detailed response
+            response = f"🔍 **Part Number Analysis: {original_pn}**\n\n"
+            series_info = self._series_data[series]
+            response += f"**📋 Series:** {series} - {series_info['name']}\n"
+            response += f"   {series_info['description']}\n"
+            response += f"   Contact Range: {series_info['contact_range']}\n\n"
+            # Gender
+            gender_name = "Male (Plug)" if gender == '1' else "Female (Receptacle)" if gender == '2' else "Unknown"
+            response += f"**🔌 Gender:** {gender} - {gender_name}\n\n"
+            
+            # Termination
+            if termination in self._termination_styles:
+                term_info = self._termination_styles[termination]
+                response += f"**🔧 Termination:** {termination} - {term_info['name']}\n"
+                response += f"   {term_info['description']}\n"
+                
+                if 'length' in term_info:
+                    response += f"   Pin Length: {term_info['length']}\n"
+                if 'pcb_thickness' in term_info:
+                    response += f"   PCB Thickness: {term_info['pcb_thickness']}\n"
+                if 'wire_gauge' in term_info:
+                    response += f"   Wire Gauge: {term_info['wire_gauge']}\n"
+                response += "\n"
+            
+            # Contact count
+            response += f"**📍 LF Contacts:** {contact_count}\n"
+            
+            # Validate contact count
+            if self._validate_contact_count(series, int(contact_count) if contact_count != '00' else 0):
+                response += f"   ✅ Valid for {series_info['name']}\n"
+            else:
+                response += f"   ❌ Invalid for {series_info['name']} (Expected: {series_info['contact_range']})\n"
+            
+            # Parse remaining components
+            if len(pn) > next_pos:
+                remaining = pn[next_pos:]
+                response += f"\n**🔩 Additional Components:** {remaining}\n"
+                
+                # Try to parse fixing hardware and HF/HP
+                hardware_match = re.match(r'^([A-Z]\d+)', remaining)
+                if hardware_match:
+                    response += f"   Fixing Hardware: {hardware_match.group(1)}\n"
+                
+                # Check for HF/HP section (after dash)
+                if '-' in original_pn:
+                    hf_hp_section = original_pn.split('-', 1)[1]
+                    response += f"   HF/HP Section: {hf_hp_section}\n"
+            
+            # Add dimensional formula if available
+            if 'formula' in series_info:
+                try:
+                    contacts_num = int(contact_count) if contact_count != '00' else 0
+                    if contacts_num > 0:
+                        formula = series_info['formula'](contacts_num)
+                        response += f"\n**📐 Dimensions:** {formula}\n"
+                except:
+                    pass
+            
+            return response
+            
+        except Exception as e:
+            return f"❌ Error decoding part number: {str(e)}\n\nPlease check the format and try again."
+
+    def _handle_generation_request(self, query: str) -> str:
+        known_info = []
+        if self._extracted_requirements:
+            known_info.append("📋 **Information from our conversation:**")
+            for key, value in self._extracted_requirements.items():
+                if key == 'series':
+                    known_info.append(f"   Series: {value} ({self._series_data[value]['name']})")
+                elif key == 'gender':
+                    gender_name = "Male" if value == '1' else "Female"
+                    known_info.append(f"   Gender: {gender_name}")
+                elif key == 'contact_count':
+                    known_info.append(f"   Contacts: {value}")
+                elif key == 'application':
+                    known_info.append(f"   Application: {value.replace('_', ' ').title()}")
+            known_info.append("")
+        
+        # Determine next question
+        next_question = self._get_next_required_question()
+        
+        response = "🚀 **CMM Part Number Generation**\n\n"
+        if known_info:
+            response += "\n".join(known_info)
+        
+        response += next_question
+        
+        return response
+
+    def _get_next_required_question(self) -> str:
+        """Get the next question needed for part number generation"""
+        
+        if 'series' not in self._extracted_requirements:
+            return """**❓ What series do you need?**
+
+• **10 - CMM 100**: 1 row, 02-25 contacts, basic applications
+• **20 - CMM 200**: 2 rows, 04-50 contacts (even), higher density  
+• **22 - CMM 220**: 2 rows, 04-60 contacts (even), supports HF/HP
+• **32 - CMM 320**: 2 rows, 006-120 contacts (multiples of 3), supports HF/HP
+• **34 - CMM 340**: 2 rows, 006-120 contacts (multiples of 3), supports HF/HP
+
+Please specify the series number or describe your application requirements."""
+
+        elif 'gender' not in self._extracted_requirements:
+            return """**❓ What gender do you need?**
+
+• **Male (1)**: Plug connector with pins
+• **Female (2)**: Receptacle connector with sockets
+
+Please specify Male or Female."""
+
+        elif 'application' not in self._extracted_requirements:
+            return """**❓ How will this connector be mounted/terminated?**
+
+• **PCB mounting**: Straight or 90° pins for circuit board
+• **Cable termination**: Crimp contacts for wires
+• **Solder termination**: Through-hole soldering
+• **Special mixed-layout**: HF/HP contacts only
+
+Please describe your mounting/termination preference."""
+
+        elif 'contact_count' not in self._extracted_requirements:
+            series = self._extracted_requirements.get('series', '22')
+            series_info = self._series_data[series]
+            return f"""**❓ How many contacts do you need?**
+
+For {series_info['name']}: {series_info['contact_range']}
+{series_info['contact_rule']}
+
+Please specify the number of contacts."""
+
+        else:
+            return self._attempt_generation()
+
+    def _attempt_generation(self) -> str:
+        """Try to generate part number with current information"""
+        try:
+            series = self._extracted_requirements.get('series', '')
+            gender = self._extracted_requirements.get('gender', '')
+            contact_count = self._extracted_requirements.get('contact_count', '')
+            application = self._extracted_requirements.get('application', '')
+            
+            # Determine termination style from application
+            termination = self._determine_termination(gender, application)
+            
+            if not all([series, gender, termination, contact_count]):
+                return "❌ Still missing some required information. Please provide the missing details."
+            
+            # Validate contact count
+            if not self._validate_contact_count(series, int(contact_count)):
+                series_info = self._series_data[series]
+                return f"❌ Invalid contact count {contact_count} for {series_info['name']}. Expected: {series_info['contact_range']}"
+            
+            # Format contact count
+            if series in ['32', '34']:
+                contacts_formatted = contact_count.zfill(3)
+            else:
+                contacts_formatted = contact_count.zfill(2)
+            
+            # Generate base part number
+            part_number = f"{series}{gender}{termination}{contacts_formatted}"
+            
+            response = f"✅ **Generated Part Number: {part_number}**\n\n"
+            response += f"**Components:**\n"
+            response += f"• Series: {series} ({self._series_data[series]['name']})\n"
+            response += f"• Gender: {gender} ({'Male' if gender == '1' else 'Female'})\n"
+            response += f"• Termination: {termination} ({self._termination_styles[termination]['name']})\n"
+            response += f"• Contacts: {contact_count}\n\n"
+            
+            # Add dimensional calculation
+            if 'formula' in self._series_data[series]:
+                try:
+                    formula = self._series_data[series]['formula'](int(contact_count))
+                    response += f"**📐 Dimensions:** {formula}\n\n"
+                except:
+                    pass
+            
+            # Ask about optional components
+            optional_questions = []
+            
+            # Check if series supports HF/HP
+            if self._series_data[series].get('supports_hfhp'):
+                optional_questions.append("🔌 Do you need High Frequency (HF) or High Power (HP) contacts?")
+            
+            optional_questions.append("🔩 Do you need fixing hardware? (F22, F24, H01, etc.)")
+            
+            if optional_questions:
+                response += "**Optional Components:**\n"
+                response += "\n".join(optional_questions)
+            else:
+                response += "This appears to be your complete part number!"
+            
+            return response
+            
+        except Exception as e:
+            return f"❌ Error generating part number: {str(e)}"
+
+    def _determine_termination(self, gender: str, application: str) -> str:
+        """Determine termination style based on application"""
+        if application == 'pcb_mount':
+            return 'Y'  # Default straight PCB
+        elif application == 'right_angle':
+            return 'V'  # 90° PCB
+        elif application == 'cable_mount' or application == 'crimp':
+            return 'S'  # Crimp for cables
+        elif application == 'solder':
+            return 'T'  # Solder termination
+        elif application == 'smt':
+            return 'R'  # SMT
+        else:
+            return 'Y'  # Default
+
+    def _handle_question_response(self, query: str) -> str:
+        """Handle responses to our questions"""
+        # This would be expanded to handle specific responses
+        return self._handle_generation_request(query)
+
+    def _provide_contextual_help(self, query: str) -> str:
+        """Provide contextual help based on query"""
+        query_lower = query.lower()
+        
+        if 'decode' in query_lower or 'meaning' in query_lower:
+            return """🔍 **Part Number Decoding**
+
+I can decode CMM part numbers for you. Just provide the part number (e.g., "221Y20F24") and I'll explain each component.
+
+Format: `[Series][Gender][Termination][Contacts][Hardware][HF/HP]`"""
+
+        elif 'generate' in query_lower or 'create' in query_lower:
+            return """🚀 **Part Number Generation** 
+
+I can help you generate a CMM part number by asking smart questions. I'll review our conversation to avoid re-asking information you've already provided.
+
+Just say "I need a part number" or "generate a part number" to start!"""
+
+        else:
+            return """🎯 **CMM Part Numbering Assistant**
+
+I can help you with:
+• **Decode** existing part numbers (explain what each part means)
+• **Generate** new part numbers (smart questioning with conversation memory)
+• **Validate** part numbers and check compatibility
+
+Try:
+• "What does 221Y20F24 mean?"
+• "I need a part number for my application"
+• "Generate a CMM part number"
+
+I'll remember details from our conversation to make the process faster! 🧠"""
+
+    async def _arun(self, query: str) -> str:
+        """Async version of _run"""
+        return self._run(query)
+
 ## Retirever class with metadata filters (works fine don't touch)
 ## Screw based logic but still better.
 class CustomRetriever(BaseRetriever):
@@ -539,7 +1108,21 @@ def processing_data(documents1, documents3):
 
         ## Settings
         print("Initializing language model and embedding model...")
-        Settings.llm = Ollama(model="qwen3:4b", temperature=0.0, num_ctx=8012, top_p=0.5, request_timeout=700, thinking=True,base_url=OLLAMA_BASE_URL)
+        # Settings.llm = Ollama(model="gemma3:27b-16k-ctx", temperature=0.1, num_ctx=15012, top_p=0.5, request_timeout=700, base_url=NICOMIND_BASE_URL, additional_kwargs={"headers": {"Authorization": f"Bearer {NICOMIND_API_KEY}"}})
+        working_llm = ChatOllama(
+            model="gemma3:27b-16k-ctx", 
+            temperature=0.1, 
+            num_ctx=15012, 
+            top_p=0.5, 
+            base_url=NICOMIND_BASE_URL,
+            client_kwargs={
+                "timeout": 700,
+                "headers": {"Authorization": f"Bearer {NICOMIND_API_KEY}"}
+            }
+        )
+
+        # Wrap it for LlamaIndex
+        Settings.llm = LangChainLLM(llm=working_llm)
         Settings.embed_model = OllamaEmbeddings(model="nomic-embed-text", base_url=OLLAMA_BASE_URL)
         
         print("Creating storage contexts...")
@@ -786,7 +1369,7 @@ class MultiSearchRetriever(BaseRetriever):
         return self._get_relevant_documents(query)
     
 ## Defining tools for Agent  
-def creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_markdown_lab, keyword_index_markdown_lab):
+def creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_markdown_lab, keyword_index_markdown_lab, conversation_history: str = ""):
     tools = []
     
     try:
@@ -796,6 +1379,7 @@ def creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_m
         print(f"- keyword_index_markdown: {type(keyword_index_markdown).__name__ if keyword_index_markdown is not None else 'None'}")
         print(f"- vector_index_markdown_lab: {type(vector_index_markdown_lab).__name__ if vector_index_markdown_lab is not None else 'None'}")
         print(f"- keyword_index_markdown_lab: {type(keyword_index_markdown_lab).__name__ if keyword_index_markdown_lab is not None else 'None'}")
+        print(f"- conversation_history length: {len(conversation_history) if conversation_history else 0}")
         
         # Only create retrievers if necessary indices are available
         if vector_index_markdown is not None and keyword_index_markdown is not None:
@@ -938,7 +1522,13 @@ def creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_m
             print("Added connector dimension tool")
         except Exception as e:
             print(f"Error adding connector dimension tool: {str(e)}")
-    
+        try:
+            part_numbering_tool = ConversationAwarePartNumberTool(conversation_history)
+            tools.append(part_numbering_tool)
+            print("Added smart part numbering tool")
+        except Exception as e:
+            print(f"Error adding part numbering tool: {str(e)}")
+
     except Exception as e:
         print(f"Error creating tools: {str(e)}")
         # At minimum, always add the search tool for fallback capability
@@ -956,15 +1546,18 @@ def creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_m
 # Create an isolated agent with its own LLM instance
 def create_isolated_agent(tools):
     llm = ChatOllama(
-    model="qwen3:4b", 
-    temperature=0.2, 
-    disable_streaming=False,    
-    num_ctx=8152, 
+    model="gemma3:27b-16k-ctx", 
+    temperature=0.1, 
+    disable_streaming=True,    
+    num_ctx=15012, 
     top_p=0.85, 
     top_k=12, 
-    base_url=OLLAMA_BASE_URL,
+    base_url=NICOMIND_BASE_URL,
     cache=False,
-    client_kwargs={"timeout": 700})    
+    client_kwargs={"timeout": 700,
+    "headers": {  
+            "Authorization": f"Bearer {NICOMIND_API_KEY}"
+        }})    
     prompt = hub.pull("intern/ask10")
     agent = create_react_agent(llm=llm, tools=tools, prompt=prompt)
     agent_executer = AgentExecutor(agent=agent, tools=tools, verbose=True, handle_parsing_errors=True, max_iterations=3, max_execution_time=None, 
@@ -976,7 +1569,7 @@ def create_isolated_agent(tools):
 # def get_worker_llm():
 #     worker_id = os.getpid()
 #     if worker_id not in _worker_llm_cache:
-#         _worker_llm_cache[worker_id] = ChatOllama(model="qwen3:4b",
+#         _worker_llm_cache[worker_id] = ChatOllama(model="gemma3:27b-16k-ctx",
 #             temperature=0.01,
 #             num_ctx=6000,
 #             client_id=f"worker-{worker_id}")
@@ -1001,7 +1594,7 @@ def return_agent(agent):
 
 # def get_llm():
 #     return ChatOllama(
-#         model="qwen3:4b",
+#         model="gemma3:27b-16k-ctx",
 #         temperature=0.01,
 #         num_ctx=8126,
 #         cache=False,
@@ -1033,15 +1626,18 @@ class LLMConnectorSelector:
     def __init__(self):
         ## Chatmodel
         self.llm = ChatOllama(
-            model="qwen3:4b", 
-            temperature=0.2, 
-            disable_streaming=False,
-            num_ctx=8152, 
+            model="gemma3:27b-16k-ctx", 
+            temperature=0.1, 
+            disable_streaming=True,
+            num_ctx=15012, 
             top_p=0.85, 
             top_k=12, 
-            base_url=OLLAMA_BASE_URL,
+            base_url=NICOMIND_BASE_URL,
             cache=False,
-            client_kwargs={"timeout": 700})  
+            client_kwargs={"timeout": 700,
+    "headers": {  
+            "Authorization": f"Bearer {NICOMIND_API_KEY}"
+        }})   
         ## Structure for the LLM response
         self.response_schemas = [ResponseSchema(name="value", description="The parsed value from user response"),ResponseSchema(name="confidence", description="Confidence score between 0 and 1"),
                                   ResponseSchema(name="reasoning", description="Explanation of the parsing logic")]
@@ -2457,67 +3053,133 @@ class LLMConnectorSelector:
             "reasoning": "Fallback: Could not confidently parse the response"
         }
     def _aggressive_fallback_parse(self, response: str, question: Dict) -> Dict:
+        
+        if question['attribute'] == 'height_requirement':
+            return self.parse_space_constraints(response)
+        
         # For pitch size, look for any number followed by mm
         if question['attribute'] == 'pitch_size':
-            pitch_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)', response.lower())
-            if pitch_match:
-                try:
-                    pitch = float(pitch_match.group(1))
-                    # Common pitch sizes
-                    common_pitches = [1.0, 1.27, 2.0]
-                    # Find closest common pitch
-                    closest_pitch = min(common_pitches, key=lambda x: abs(x - pitch))
-                    return {
-                        "value": closest_pitch,
-                        "confidence": 0.6,
-                        "reasoning": f"Approximated to standard pitch size {closest_pitch}mm"
-                    }
-                except (ValueError, IndexError):
-                    pass
-                    
-            # If no number with mm, check for standard pitch mentions
-            if "1mm" in response.lower() or "1 mm" in response.lower():
-                return {"value": 1.0, "confidence": 0.6, "reasoning": "Matched '1mm' in response"}
-            elif "1.27mm" in response.lower() or "1.27 mm" in response.lower():
-                return {"value": 1.27, "confidence": 0.6, "reasoning": "Matched '1.27mm' in response"}
-            elif "2mm" in response.lower() or "2 mm" in response.lower():
-                return {"value": 2.0, "confidence": 0.6, "reasoning": "Matched '2mm' in response"}
+            pitch_patterns = [
+                r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)\s*pitch',
+                r'pitch\s*(?:size|of)?\s*(?:is|:)?\s*(\d+(?:\.\d+)?)',
+                r'(\d+(?:\.\d+)?)\s*mm\s*(?:pitch|spacing)',
+                r'pitch\s*(?:of)?\s*(\d+(?:\.\d+)?)',
+                r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)(?:\s|$)', 
+                r'^(\d+(?:\.\d+)?)$' 
+            ]
+            
+            for pattern in pitch_patterns:
+                pitch_match = re.search(pattern, response.lower())
+                if pitch_match:
+                    try:
+                        pitch_size = float(pitch_match.group(1))
+                        if 0.5 <= pitch_size <= 2.5:
+                            return {"value": pitch_size, "confidence": 0.8, "reasoning": f"Extracted pitch size: {pitch_size}mm"}
+                        else:
+                            return {"value": pitch_size, "confidence": 0.5, "reasoning": f"Extracted unusual pitch size: {pitch_size}mm"}
+                    except (ValueError, IndexError):
+                        continue
         
-        # For housing_material with aggressive matching
+        # Enhanced pin count parsing
+        elif question['attribute'] == 'pin_count':
+            pin_patterns = [
+                r'(\d+)\s*(?:pins?|contacts?)',
+                r'(?:pins?|contacts?)\s*(?::|is|=)?\s*(\d+)',
+                r'^(\d+)$' 
+            ]
+            
+            for pattern in pin_patterns:
+                pin_match = re.search(pattern, response.lower())
+                if pin_match:
+                    try:
+                        pin_count = int(pin_match.group(1))
+                        if 2 <= pin_count <= 120:
+                            return {"value": pin_count, "confidence": 0.8, "reasoning": f"Extracted pin count: {pin_count}"}
+                        else:
+                            return {"value": pin_count, "confidence": 0.5, "reasoning": f"Extracted pin count outside typical range: {pin_count}"}
+                    except (ValueError, IndexError):
+                        continue
+        
+        # Enhanced housing material parsing
         elif question['attribute'] == 'housing_material':
             response_lower = response.lower()
-            
-            # Check for preference indicators
-            preference_terms = ['prefer', 'preferable', 'ideally', 'better', 'if possible', 'would like']
-            is_preference = any(term in response_lower for term in preference_terms)
-            
-            if any(word in response_lower for word in ['metal', 'metallic', 'alumin', 'steel', 'emi', 'shield']):
-                confidence = 0.85 if is_preference else 0.95
-                return {"value": "metal", "confidence": confidence, 
-                        "reasoning": "Matched metal-related terms" + (" (as preference)" if is_preference else "")}
-            else:
-                # Default to plastic if no metal indication
-                confidence = 0.85 if is_preference else 0.95
-                return {"value": "plastic", "confidence": confidence, 
-                        "reasoning": "Defaulted to plastic as no metal indicators found" + (" (as preference)" if is_preference else "")}
-            
-        # For temperature, extract any number before C or degrees
-        elif question['attribute'] == 'temp_range':
-            temp_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:c|celsius|°c|degrees?)', response.lower())
-            if temp_match:
-                try:
-                    temp = float(temp_match.group(1))
-                    return {"value": temp, "confidence": 0.6, "reasoning": f"Extracted temperature {temp}°C from response"}
-                except (ValueError, IndexError):
-                    pass
+            if any(word in response_lower for word in ['metal', 'metallic', 'aluminium', 'aluminum', 'steel', 'emi', 'shield']):
+                return {"value": "metal", "confidence": 0.8, "reasoning": "Detected metal housing preference"}
+            elif any(word in response_lower for word in ['plastic', 'polymer', 'composite', 'non-metal']):
+                return {"value": "plastic", "confidence": 0.8, "reasoning": "Detected plastic housing preference"}
         
-        default_values = {'pitch_size': 2.0,  
+        # Enhanced right_angle parsing
+        elif question['attribute'] == 'right_angle':
+            response_lower = response.lower()
+            if any(word in response_lower for word in ['right', 'angle', '90', 'ninety', 'parallel', 'angled']):
+                return {"value": True, "confidence": 0.7, "reasoning": "Detected right-angle preference"}
+            elif any(word in response_lower for word in ['straight', 'direct', 'vertical', 'perpendicular']):
+                return {"value": False, "confidence": 0.7, "reasoning": "Detected straight connector preference"}
+        
+        # Enhanced current parsing
+        elif question['attribute'] == 'max_current':
+            current_patterns = [
+                r'(\d+(?:\.\d+)?)\s*(?:a|amp|amps|ampere)',
+                r'current\s*(?::|is|=)?\s*(\d+(?:\.\d+)?)',
+                r'^(\d+(?:\.\d+)?)$'  # Just the number
+            ]
+            
+            for pattern in current_patterns:
+                current_match = re.search(pattern, response.lower())
+                if current_match:
+                    try:
+                        current = float(current_match.group(1))
+                        return {"value": current, "confidence": 0.7, "reasoning": f"Extracted current: {current}A"}
+                    except (ValueError, IndexError):
+                        continue
+        
+        # Enhanced temperature parsing
+        elif question['attribute'] == 'temp_range':
+            temp_patterns = [
+                r'(\d+(?:\.\d+)?)\s*(?:°c|celsius|degrees?)',
+                r'temp\w*\s*(?::|is|=)?\s*(\d+(?:\.\d+)?)',
+                r'^(\d+(?:\.\d+)?)$'  # Just the number
+            ]
+            
+            for pattern in temp_patterns:
+                temp_match = re.search(pattern, response.lower())
+                if temp_match:
+                    try:
+                        temp = float(temp_match.group(1))
+                        return {"value": temp, "confidence": 0.6, "reasoning": f"Extracted temperature {temp}°C from response"}
+                    except (ValueError, IndexError):
+                        continue
+        
+        # Enhanced wire gauge parsing
+        elif question['attribute'] == 'wire_gauge':
+            awg_patterns = [
+                r'awg\s*(\d+)',
+                r'(\d+)\s*awg',
+                r'gauge\s*(\d+)',
+                r'^(\d+)$'  
+            ]
+            
+            for pattern in awg_patterns:
+                awg_match = re.search(pattern, response.lower())
+                if awg_match:
+                    try:
+                        awg = int(awg_match.group(1))
+                        if 10 <= awg <= 30:  
+                            return {"value": f"AWG{awg}", "confidence": 0.7, "reasoning": f"Extracted wire gauge: AWG{awg}"}
+                        else:
+                            return {"value": f"AWG{awg}", "confidence": 0.5, "reasoning": f"Extracted unusual wire gauge: AWG{awg}"}
+                    except (ValueError, IndexError):
+                        continue
+        
+        default_values = {
+            'pitch_size': 2.0,  
             'housing_material': 'plastic',  
             'right_angle': True,  
             'pin_count': 20,  
             'max_current': 5.0,
             'temp_range': 85.0,
-            'connection_type': 'PCB-to-PCB'}
+            'connection_type': 'PCB-to-PCB'
+        }
         
         if question['attribute'] in default_values:
             return {"value": default_values[question['attribute']],
@@ -2528,6 +3190,126 @@ class LLMConnectorSelector:
         return {"value": None,
             "confidence": 0.0,
             "reasoning": "Could not determine a value even with aggressive fallback"}
+
+
+    def _simple_fallback_parse(self, response: str, question: Dict) -> Dict:
+        
+        if question['attribute'] == 'height_requirement':
+            return self.parse_space_constraints(response)
+        
+        if question['attribute'] == 'pitch_size':
+            pitch_values = [1.0, 1.27, 2.0]
+            for pitch in pitch_values:
+                if str(pitch) in response or f"{pitch:.1f}" in response:
+                    return {
+                        "value": pitch,
+                        "confidence": 0.8,
+                        "reasoning": f"Matched standard pitch size {pitch}mm in response"}
+            
+            # Try to extract any number as pitch
+            numbers = re.findall(r'\d+\.?\d*', response)
+            for num_str in numbers:
+                try:
+                    num = float(num_str)
+                    if 0.5 <= num <= 2.5:
+                        return {
+                            "value": num,
+                            "confidence": 0.6,
+                            "reasoning": f"Extracted potential pitch size {num}mm"}
+                except ValueError:
+                    continue
+        
+        elif question['attribute'] == 'pin_count':
+            # Extract numeric values
+            numbers = re.findall(r'\b\d+\b', response)
+            if numbers:
+                try:
+                    pin_count = int(numbers[0])
+                    if 1 <= pin_count <= 200:
+                        return {
+                            "value": pin_count,
+                            "confidence": 0.7,
+                            "reasoning": f"Extracted pin count {pin_count} from response"
+                        }
+                except (ValueError, IndexError):
+                    pass
+        
+        elif question['attribute'] == 'housing_material':
+            # Check for housing material keywords
+            response_lower = response.lower()
+            if 'metal' in response_lower:
+                return {
+                    "value": "metal",
+                    "confidence": 0.8,
+                    "reasoning": "User mentioned metal housing"}
+            elif 'plastic' in response_lower:
+                return {
+                    "value": "plastic",
+                    "confidence": 0.8,
+                    "reasoning": "User mentioned plastic housing"}
+            elif 'emi' in response_lower or 'shield' in response_lower:
+                return {
+                    "value": "metal",
+                    "confidence": 0.7,
+                    "reasoning": "User mentioned EMI or shielding, which implies metal housing"}
+        
+        elif question['attribute'] == 'max_current':
+            # Look for current values
+            numbers = re.findall(r'\d+\.?\d*', response)
+            for num_str in numbers:
+                try:
+                    num = float(num_str)
+                    if 0.1 <= num <= 50:  # Reasonable current range
+                        return {
+                            "value": num,
+                            "confidence": 0.6,
+                            "reasoning": f"Extracted potential current {num}A"}
+                except ValueError:
+                    continue
+        
+        elif question['attribute'] == 'temp_range':
+            # Look for temperature values
+            numbers = re.findall(r'\d+\.?\d*', response)
+            for num_str in numbers:
+                try:
+                    num = float(num_str)
+                    if -40 <= num <= 200: 
+                        return {
+                            "value": num,
+                            "confidence": 0.6,
+                            "reasoning": f"Extracted potential temperature {num}°C"}
+                except ValueError:
+                    continue
+        
+        # For yes/no questions
+        if question['text'].endswith('?'):
+            response_lower = response.lower()
+            if any(word in response_lower for word in ['yes', 'yeah', 'yep', 'correct', 'right', 'true']):
+                return {
+                    "value": True,
+                    "confidence": 0.7,
+                    "reasoning": "User responded affirmatively"}
+            elif any(word in response_lower for word in ['no', 'nope', 'not', 'don\'t', 'dont', 'false']):
+                return {
+                    "value": False,
+                    "confidence": 0.7,
+                    "reasoning": "User responded negatively"}
+        
+        # General fallback for any response
+        response_lower = response.lower()
+        if any(phrase in response_lower for phrase in ["i dont know", "i don't know", "unknown", "unclear", "not sure"]):
+            return {
+                "value": None,
+                "confidence": 0.0,
+                "reasoning": "User explicitly expressed uncertainty"
+            }
+        
+        # Return low confidence for other cases
+        return {
+            "value": response.strip(),
+            "confidence": 0.4,
+            "reasoning": "Fallback: Could not confidently parse the response"
+        }
     ## Understand user message with this and them grade confidence score
     async def parse_response_with_llm(self, response: str, question: Dict) -> Dict:
         try:
@@ -2608,15 +3390,34 @@ class LLMConnectorSelector:
             
             # Skip location/panel mount question for PCB-to-PCB (always on-board)
             questions_to_skip.add('location')
-            
+            # Skip current question for PCB-to-PCB (no high current cables)
+            questions_to_skip.add('max_current')
             # Mark these as answered with default values
             if 'wire_gauge' not in self.answers:
                 self.answers['wire_gauge'] = (None, 0.0)
                 self.asked_questions.add('wire_gauge')
                 
             if 'location' not in self.answers:
-                self.answers['location'] = ("internal", 0.95)  # PCB-to-PCB is always internal/on-board
+                self.answers['location'] = ("internal", 0.95) 
                 self.asked_questions.add('location')
+            
+            if 'max_current' not in self.answers:
+                self.answers['max_current'] = (5.0, 0.8) 
+                self.asked_questions.add('max_current')
+        
+        if 'wire_gauge' in self.answers and 'wire_gauge' in self.asked_questions:
+            awg_value, awg_confidence = self.answers['wire_gauge']
+            if awg_value is not None and awg_confidence > 0.5:
+                # Skip max_current question since AWG determines current capacity
+                questions_to_skip.add('max_current')
+                
+                # Automatically set current based on AWG if not already set
+                if 'max_current' not in self.answers:
+                    inferred_current = self.get_current_from_awg(awg_value)
+                    if inferred_current:
+                        self.answers['max_current'] = (inferred_current, awg_confidence * 0.9)
+                        self.asked_questions.add('max_current')
+                        print(f"Automatically inferred {inferred_current}A current capacity from {awg_value}")
         if height_question_asked and 'height_requirement' in self.answers:
             _, confidence = self.answers['height_requirement']
             # Consider the answer uncertain if confidence is low or value is None
@@ -2646,26 +3447,50 @@ class LLMConnectorSelector:
             
         # Sort by order and return the first available question
         return min(available_questions, key=lambda x: x['order'])
-    def parse_space_constraints(self, response: str) -> Dict:
-        response_lower = response.lower().replace('millimeters', 'mm').replace('millimeter', 'mm')
+    def get_current_from_awg(self, awg_value):
+        if isinstance(awg_value, str):
+            import re
+            awg_match = re.search(r'(\d+)', str(awg_value))
+            if awg_match:
+                awg_num = int(awg_match.group(1))
+            else:
+                return None
+        elif isinstance(awg_value, (int, float)):
+            awg_num = int(awg_value)
+        else:
+            return None
+        awg_current_map = {
+            12: 20.0,14: 15.0, 16: 10.0, 18: 8.0, 20: 5.0, 22: 3.0, 24: 2.5, 26: 2.0, 
+            28: 1.5, 30: 1.0}
         
+        return awg_current_map.get(awg_num, None)
+    def parse_space_constraints(self, response: str) -> Dict:
+    
+        response_lower = response.lower().strip()
+        response_lower = response_lower.replace('millimeters', 'mm').replace('millimeter', 'mm')
+        response_lower = response_lower.replace('×', 'x').replace('X', 'x')  
         # Check for uncertainty phrases first
         uncertainty_phrases = [
             "don't know", "dont know", "not sure", "uncertain", 
             "no idea", "no specific", "not specified", "unsure",
             "don't have", "no constraint", "no requirement", "any height",
-            "flexible", "whatever works", "any option", "no particular constraint"]
+            "flexible", "whatever works", "any option", "no particular constraint",
+            "doesn't matter", "any size", "no limit"
+        ]
         
         if any(phrase in response_lower for phrase in uncertainty_phrases):
             return {
                 "value": None,
                 "confidence": 0.0,
-                "reasoning": "User expressed uncertainty about spatial constraints"}
+                "reasoning": "User expressed uncertainty about spatial constraints"
+            }
         
         # Look for footprint minimization intent
         footprint_indicators = [
             "minimum footprint", "small footprint", "compact", "tight space", 
-            "limited space", "not much space", "space available", "small as possible"]
+            "limited space", "not much space", "space available", "small as possible",
+            "as small as", "minimize", "minimal", "tiny"
+        ]
         is_space_constrained = any(indicator in response_lower for indicator in footprint_indicators)
         
         # Extract pin count information when present
@@ -2673,117 +3498,217 @@ class LLMConnectorSelector:
         pin_match = re.search(pin_pattern, response_lower)
         pin_count = int(pin_match.group(1)) if pin_match else None
         
-        # Look for "fit within" or similar constraint phrases
-        constraint_phrases = ["fit within", "fit in", "maximum of", "not exceed", "at most", "up to"]
+        # Look for constraint phrases
+        constraint_phrases = ["fit within", "fit in", "maximum of", "not exceed", "at most", "up to", "less than", "under", "below"]
         is_max_constraint = any(phrase in response_lower for phrase in constraint_phrases)
         
-        # Check for 2D dimensions (most common format)
-        two_d_pattern = r'(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeter)?'
-        two_d_match = re.search(two_d_pattern, response_lower)
-        if two_d_match:
-            dim1, dim2 = map(float, two_d_match.groups())
-            # In PCB context, height is typically the smaller dimension
-            length = max(dim1, dim2)
-            height = min(dim1, dim2)
-            
-            # Build detailed reasoning
-            reasoning = f"Extracted dimensions: {dim1}x{dim2}mm (using {height}mm as height)"
-            if is_space_constrained:
-                reasoning += " with limited space constraint"
-            if pin_count:
-                reasoning += f" for {pin_count} pins"
-            if is_max_constraint:
-                reasoning += " as maximum allowed dimensions"
-                
-            return {
-                "value": height,
-                "confidence": 0.95 if is_space_constrained or is_max_constraint else 0.9,
-                "reasoning": reasoning,
-                "is_maximum": is_max_constraint or is_space_constrained,
-                "all_dimensions": {"length": length, "height": height},
-                "pin_count": pin_count
-            }
+        # **ENHANCED 2D DIMENSION PATTERNS** - Handle all variations
+        two_d_patterns = [
+            r'(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)?',
+            r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)?',
+            r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)',
+            r'(\d+(?:\.\d+)?)\s*(?:by|BY)\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)?',
+            r'dimensions?\s*:?\s*(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)?',
+            r'size\s*:?\s*(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)?']
+        
+        for pattern in two_d_patterns:
+            two_d_match = re.search(pattern, response_lower)
+            if two_d_match:
+                try:
+                    dim1, dim2 = map(float, two_d_match.groups())
+                    length = max(dim1, dim2)
+                    height = min(dim1, dim2)
+                    
+                    reasoning = f"Extracted dimensions: {dim1}x{dim2}mm (using {height}mm as height)"
+                    if is_space_constrained:
+                        reasoning += " with limited space constraint"
+                    if pin_count:
+                        reasoning += f" for {pin_count} pins"
+                    if is_max_constraint:
+                        reasoning += " as maximum allowed dimensions"
+                        
+                    return {
+                        "value": height,
+                        "confidence": 0.95 if is_space_constrained or is_max_constraint else 0.9,
+                        "reasoning": reasoning,
+                        "is_maximum": is_max_constraint or is_space_constrained,
+                        "all_dimensions": {"length": length, "height": height},
+                        "pin_count": pin_count
+                    }
+                except (ValueError, TypeError):
+                    continue  
         
         height_patterns = [
-            # Direct height specification
-            r'height\s*(?:of|is|:)?\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeter)',
-            r'(\d+(?:\.\d+)?)\s*(?:mm|millimeter)\s*(?:tall|height|high)',
-            r'height\s*(?:requirement|constraint|limit)?\s*(?:of|is|:)?\s*(\d+(?:\.\d+)?)',
-            
-            # Constraint-based specification
-            r'maximum\s*(?:height|space|clearance)\s*(?:of|is|:)?\s*(\d+(?:\.\d+)?)',
+            r'height\s*(?:of|is|:|-|=)?\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)',
+            r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)\s*(?:tall|height|high)',
+            r'height\s*(?:requirement|constraint|limit)?\s*(?:of|is|:|-|=)?\s*(\d+(?:\.\d+)?)',
+            r'maximum\s*(?:height|space|clearance)\s*(?:of|is|:|-|=)?\s*(\d+(?:\.\d+)?)',
             r'(?:height|space|clearance)\s*(?:less than|under|below|not more than)\s*(\d+(?:\.\d+)?)',
-            r'up\s*to\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeter)\s*(?:height|tall|high|clearance)',
-            r'(?:can\'t exceed|cannot exceed|not exceed|no more than)\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeter)',
-            
-            # Approximate specification
-            r'(?:about|around|approximately|roughly|circa|~)\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeter)',
-            
-            # Range specification
-            r'(?:between|from)\s*(\d+(?:\.\d+)?)\s*(?:and|to)\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeter)',
-            
-            # Simple numeric with mm unit
-            r'(\d+(?:\.\d+)?)\s*(?:mm|millimeter)'
+            r'up\s*to\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)\s*(?:height|tall|high|clearance)?',
+            r'(?:can\'t exceed|cannot exceed|not exceed|no more than)\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)',
+            r'(?:about|around|approximately|roughly|circa|~)\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)',
+            r'(?:between|from)\s*(\d+(?:\.\d+)?)\s*(?:and|to)\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)',
+            r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)(?:\s|$)',
+            r'^(\d+(?:\.\d+)?)$'
         ]
         
         for pattern in height_patterns:
             match = re.search(pattern, response_lower)
             if match:
-                # Handle range patterns specially
-                if 'between' in pattern or 'from' in pattern:
-                    min_val, max_val = map(float, match.groups())
-                    # Use average of range
-                    height = (min_val + max_val) / 2
-                    return {
-                        "value": height,
-                        "confidence": 0.8,
-                        "reasoning": f"Using midpoint {height}mm from range {min_val}-{max_val}mm",
-                        "range": [min_val, max_val]
-                    }
-                else:
-                    height = float(match.group(1))
-                    
-                    # Assign confidence based on specificity
-                    if 'about' in pattern or 'around' in pattern or 'approximately' in pattern:
-                        confidence = 0.75
-                    elif 'maximum' in pattern or 'up to' in pattern:
-                        confidence = 0.85
+                try:
+                    if 'between' in pattern or 'from' in pattern:
+                        if len(match.groups()) >= 2:
+                            min_val, max_val = map(float, match.groups()[:2])
+                            height = (min_val + max_val) / 2
+                            return {
+                                "value": height,
+                                "confidence": 0.8,
+                                "reasoning": f"Using midpoint {height}mm from range {min_val}-{max_val}mm",
+                                "range": [min_val, max_val]
+                            }
                     else:
-                        confidence = 0.9
-                    
-                    # Validate reasonable range
-                    if 1.0 <= height <= 20.0:
-                        return {
-                            "value": height,
-                            "confidence": confidence,
-                            "reasoning": f"Extracted height: {height}mm"
-                        }
-                    else:
-                        return {
-                            "value": height,
-                            "confidence": 0.5,
-                            "reasoning": f"Extracted unusual height value: {height}mm"
-                        }
+                        height = float(match.group(1))
+                        
+                        if 'about' in pattern or 'around' in pattern or 'approximately' in pattern:
+                            confidence = 0.75
+                        elif 'maximum' in pattern or 'up to' in pattern:
+                            confidence = 0.85
+                        elif pattern.endswith('$'):  
+                            confidence = 0.7 
+                        else:
+                            confidence = 0.9
+                        # Validate reasonable range
+                        if 1.0 <= height <= 20.0:
+                            return {"value": height,
+                                "confidence": confidence,
+                                "reasoning": f"Extracted height: {height}mm"}
+                        else:
+                            return {"value": height,
+                                "confidence": 0.5,
+                                "reasoning": f"Extracted unusual height value: {height}mm (outside typical range)"}
+                except (ValueError, TypeError, IndexError):
+                    continue  
         
-        if 'small' in response_lower or 'compact' in response_lower or 'tiny' in response_lower:
+        if any(term in response_lower for term in ['small', 'compact', 'tiny', 'low profile']):
             return {
                 "value": 4.0, 
                 "confidence": 0.6,
-                "reasoning": "Inferred small height requirement from descriptive terms"
+                "reasoning": "Inferred small height requirement (4mm) from descriptive terms"
             }
-        elif 'large' in response_lower or 'big' in response_lower or 'spacious' in response_lower:
+        elif any(term in response_lower for term in ['large', 'big', 'spacious', 'tall']):
             return {
                 "value": 10.0,  
                 "confidence": 0.6,
-                "reasoning": "Inferred larger height requirement from descriptive terms"
+                "reasoning": "Inferred larger height requirement (10mm) from descriptive terms"
             }
+        elif any(term in response_lower for term in ['medium', 'standard', 'normal', 'typical']):
+            return {
+                "value": 6.0,
+                "confidence": 0.6,
+                "reasoning": "Inferred medium height requirement (6mm) from descriptive terms"
+            }
+        
+        number_pattern = r'(\d+(?:\.\d+)?)'
+        numbers = re.findall(number_pattern, response_lower)
+        if numbers:
+            # Take the first reasonable number as potential height
+            for num_str in numbers:
+                try:
+                    num = float(num_str)
+                    if 1.0 <= num <= 20.0:  # Reasonable height range
+                        return {
+                            "value": num,
+                            "confidence": 0.4,
+                            "reasoning": f"Extracted {num}mm as potential height constraint from numeric value in response"
+                        }
+                except ValueError:
+                    continue
         
         # No height information found
         return {
             "value": None,
             "confidence": 0.0,
-            "reasoning": "Could not extract any height or space constraint information"
+            "reasoning": "No dimensional constraints found in response"
         }
+
+
+    def _enhanced_fallback_parse(self, response: str, question: Dict) -> Dict:
+        
+        # For height_requirement, use the same logic as parse_space_constraints
+        if question['attribute'] == 'height_requirement':
+            return self.parse_space_constraints(response)
+        
+        # For other attributes, use existing fallback logic with enhancements
+        text_lower = response.lower()
+        
+        # Enhanced pitch parsing
+        if question['attribute'] == 'pitch_size':
+            pitch_patterns = [
+                r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)\s*pitch',
+                r'pitch\s*(?:size|of)?\s*(?:is|:)?\s*(\d+(?:\.\d+)?)',
+                r'(\d+(?:\.\d+)?)\s*mm\s*(?:pitch|spacing)',
+                r'pitch\s*(?:of)?\s*(\d+(?:\.\d+)?)',
+                r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)(?:\s|$)',  # Just "1.27mm"
+                r'^(\d+(?:\.\d+)?)$'  # Just "1.27"
+            ]
+            
+            for pattern in pitch_patterns:
+                match = re.search(pattern, text_lower)
+                if match:
+                    try:
+                        pitch_size = float(match.group(1))
+                        if 0.5 <= pitch_size <= 2.5:
+                            return {"value": pitch_size, "confidence": 0.8, "reasoning": f"Extracted pitch size: {pitch_size}mm"}
+                        else:
+                            return {"value": pitch_size, "confidence": 0.5, "reasoning": f"Extracted unusual pitch size: {pitch_size}mm"}
+                    except (ValueError, IndexError):
+                        continue
+        
+        # Enhanced pin count parsing
+        if question['attribute'] == 'pin_count':
+            pin_patterns = [
+                r'(\d+)\s*(?:pins?|contacts?)',
+                r'(?:pins?|contacts?)\s*(?::|is|=)?\s*(\d+)',
+                r'^(\d+)$'  # Just the number
+            ]
+            
+            for pattern in pin_patterns:
+                match = re.search(pattern, text_lower)
+                if match:
+                    try:
+                        pin_count = int(match.group(1))
+                        if 2 <= pin_count <= 120:
+                            return {"value": pin_count, "confidence": 0.9, "reasoning": f"Extracted pin count: {pin_count}"}
+                        else:
+                            return {"value": pin_count, "confidence": 0.6, "reasoning": f"Extracted pin count outside typical range: {pin_count}"}
+                    except (ValueError, IndexError):
+                        continue
+        
+        # Use existing default values as last resort
+        default_values = {
+            'pitch_size': 2.0,  
+            'housing_material': 'plastic',  
+            'right_angle': True,  
+            'pin_count': 20,  
+            'max_current': 5.0,
+            'temp_range': 85.0,
+            'connection_type': 'PCB-to-PCB'
+        }
+        
+        if question['attribute'] in default_values:
+            return {
+                "value": default_values[question['attribute']],
+                "confidence": 0.3,
+                "reasoning": f"Used default value after parse failure: {default_values[question['attribute']]}"
+            }
+        
+        return {
+            "value": None,
+            "confidence": 0.0,
+            "reasoning": "Could not parse response even with enhanced fallback"
+        }
+
+
     def normalize_connection_type(self, value):
         if not isinstance(value, str):
             return value
@@ -3226,7 +4151,18 @@ class LLMConnectorSelector:
         return max(min_score, min(100.0, final_score))
 
 def pre_process_routing(user_input, formatted_chat_history):
-
+    user_lower = user_input.lower()
+    part_numbering_keywords = [
+        'part number', 'partnumber', 'p/n', 'pn',
+        'decode', 'generate', 'create part']
+    if any(keyword in user_lower for keyword in part_numbering_keywords):
+        print("Direct routing: Part numbering request detected")
+        return {'score': 'general'}
+    
+    # Check for part number patterns
+    if re.search(r'(10|20|22|32|34)[12][A-Z]+\d+', user_input.upper()):
+        print("Direct routing: Part number pattern detected")
+        return {'score': 'general'}
     # Force routing to general for any input with a question mark
     if '?' in user_input:
         print("Direct routing enforcement: Input contains question mark, routing to general")
@@ -3411,11 +4347,16 @@ async def chat(request: Request):
         formatted_chat_history = "\n".join(chat_history)
 
         # Create tools with whatever indices we have (may be None)
-        tools = creating_tools(vector_index_markdown, keyword_index_markdown, vector_index_markdown_lab, keyword_index_markdown_lab)
+        tools = creating_tools(vector_index_markdown, keyword_index_markdown, 
+                      vector_index_markdown_lab, keyword_index_markdown_lab,
+                      conversation_history=formatted_chat_history)
         agent_with_chat_history = await get_agent(tools)
         session_history.add_message(HumanMessage(content=user_input))
 
-        llm = ChatOllama(model="qwen3:4b", temperature=0.0, num_ctx=8152, cache=False, format="json",base_url=OLLAMA_BASE_URL)
+        llm = ChatOllama(model="gemma3:27b-16k-ctx", temperature=0.0, num_ctx=15012, cache=False, format="json",base_url=NICOMIND_BASE_URL,client_kwargs={"timeout": 700,
+    "headers": {  
+            "Authorization": f"Bearer {NICOMIND_API_KEY}"
+        }})
         
         print("Routing your query now")
         ## Routing query to either general or selection
@@ -3707,15 +4648,20 @@ async def chat(request: Request):
                             print("Agent output empty/invalid, synthesizing from tool data...")
                             
                             llm = ChatOllama(
-                                model="qwen3:4b", 
-                                temperature=0.2, 
-                                disable_streaming=False,
-                                num_ctx=8152, 
+                                model="gemma3:27b-16k-ctx", 
+                                temperature=0.1, 
+                                disable_streaming=True,
+                                num_ctx=15012, 
                                 top_p=0.85, 
                                 top_k=12, 
-                                base_url=OLLAMA_BASE_URL,
+                                base_url=NICOMIND_BASE_URL,
                                 cache=False,
-                                client_kwargs={"timeout": 700}
+                                client_kwargs={
+        "timeout": 700,
+        "headers": { 
+            "Authorization": f"Bearer {NICOMIND_API_KEY}"
+        }
+    }
                             )
                             
                             llm_prompt = f"""
@@ -3826,6 +4772,54 @@ async def chat(request: Request):
         raise HTTPException(
             status_code=500,
             detail=f'An error occurred while processing your request: {str(e)}')
+@app.post("/part-numbering")
+async def part_numbering_endpoint(request: Request):
+    """Dedicated endpoint for part numbering tasks"""
+    try:
+        body = await request.json()
+        session_id = body.get('sessionId')
+        user_input = body['message']
+        action = body.get('action', 'auto')  # 'decode', 'generate', or 'auto'
+        
+        if session_id not in session_mapping:
+            raise HTTPException(status_code=404, detail="Session not found")
+        
+        chat_id = session_mapping[session_id]['chat_id']
+        session_history = get_session_history(session_id, chat_id)
+        history_messages = session_history.get_messages()
+        
+        # Format history
+        formatted_history = "\n".join([
+            f"{'Human' if isinstance(msg, HumanMessage) else 'AI'}: {msg.content}"
+            for msg in history_messages
+        ])
+        
+        # Create part numbering tool
+        part_tool = ConversationAwarePartNumberTool(formatted_history)
+        
+        # Process request
+        if action == 'decode':
+            result = part_tool._decode_part_number(user_input)
+        elif action == 'generate':
+            result = part_tool._handle_generation_request(user_input)
+        else:
+            result = part_tool._run(user_input)
+        
+        # Save to history
+        session_history.add_message(HumanMessage(content=user_input))
+        session_history.add_message(AIMessage(content=result))
+        
+        return JSONResponse(content={
+            "response": result,
+            "session_id": session_id,
+            "action_taken": action
+        })
+        
+    except Exception as e:
+        return JSONResponse(
+            status_code=500,
+            content={"error": f"Part numbering error: {str(e)}"}
+        )
 ## Creates new sessionID and chat ID, welcome message
 @app.post("/new_session")
 async def new_session():
@@ -3946,8 +4940,10 @@ async def startup_event():
             
             # Create tools based on loaded data
             print("Creating tools...")
+            print("Creating tools...")
             tools = creating_tools(vector_index_markdown, keyword_index_markdown, 
-                                  vector_index_markdown_lab, keyword_index_markdown_lab)
+                                vector_index_markdown_lab, keyword_index_markdown_lab,
+                                conversation_history="") 
             
             # Initialize agent pool
             print("Initializing agent pool...")
