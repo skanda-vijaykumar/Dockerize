@@ -122,6 +122,7 @@ from langchain.tools import BaseTool
 from langchain.memory import ConversationBufferMemory
 import re
 import json
+import math
 
 class ConversationAwarePartNumberTool(BaseTool):
     name: str = "cmm_part_numbering_smart"
@@ -140,165 +141,337 @@ class ConversationAwarePartNumberTool(BaseTool):
     
     def __init__(self, conversation_history: str = ""):
         super().__init__()
-        # Use PRIVATE attributes (with underscore) to avoid Pydantic validation
         self._conversation_history = conversation_history
         self._extracted_requirements = {}
         self._series_data = {}
         self._termination_styles = {}
+        self._contact_types = {}
         self._initialize_data()
         self._extract_requirements_from_history()
     
     def _initialize_data(self):
-        """Initialize the part numbering rules and data"""
         self._series_data = {
             '10': {
                 'name': 'CMM 100',
                 'description': '1 row connector for basic applications',
+                'rows': 1,
                 'contact_range': '02-25',
                 'contact_rule': 'Any number from 2 to 25',
                 'supports_hfhp': False,
-                'formula': lambda n: f"A = ({n} × 2) - 2 = {(n * 2) - 2}mm"
+                'valid_counts': list(range(2, 26)),
+                'formula': self._formula_series_10
             },
             '20': {
                 'name': 'CMM 200', 
                 'description': '2 rows connector for higher density',
+                'rows': 2,
                 'contact_range': '04-50 (even)',
                 'contact_rule': 'Even numbers from 4 to 50',
                 'supports_hfhp': False,
-                'formula': lambda n: f"A = {n} - 2 = {n - 2}mm, B = A + 5 = {(n - 2) + 5}mm"
+                'valid_counts': [i for i in range(4, 51) if i % 2 == 0],
+                'formula': self._formula_series_20
             },
             '22': {
                 'name': 'CMM 220',
                 'description': '2 rows with mixed-layout support (HF/HP)',
+                'rows': 2,
                 'contact_range': '04-60 (even) or 00 (special)',
                 'contact_rule': 'Even numbers from 4 to 60, or 00 for special mixed-layout',
                 'supports_hfhp': True,
-                'max_hf_hp': 15,
-                'formula': lambda n, hf=0, hp=0: f"A = {n} - 2 = {n - 2}mm, B = ({hf}+{hp})×4 + A + 7 = {(hf + hp) * 4 + (n - 2) + 7}mm"
+                'valid_counts': [0] + [i for i in range(4, 61) if i % 2 == 0],
+                'max_hfhp_total': 15,
+                'max_hfhp_individual': 12,
+                'hfhp_contact_type': '30',
+                'b_max': 65,
+                'formula': self._formula_series_22
             },
             '32': {
                 'name': 'CMM 320',
-                'description': '2 rows, 006-120 contacts with mixed-layout support',
+                'description': '3 rows with mixed-layout support (HF/HP)',
+                'rows': 3,
                 'contact_range': '006-120 (multiples of 3) or 000 (special)',
                 'contact_rule': 'Multiples of 3 from 6 to 120, or 000 for special mixed-layout',
                 'supports_hfhp': True,
-                'max_hf_hp': 20,
-                'formula': lambda n: f"A = {n} × 2/3 - 2 = {int(n * 2/3) - 2}mm"
+                'valid_counts': [0] + [i for i in range(6, 121) if i % 3 == 0],
+                'max_hfhp_total': 20,
+                'max_hfhp_individual': 20,
+                'hfhp_contact_type': '30',
+                'b_max': 87,
+                'formula': self._formula_series_32
             },
             '34': {
                 'name': 'CMM 340',
-                'description': '2 rows, 006-120 contacts with mixed-layout support',
+                'description': '3 rows with mixed-layout support (uses series 22 contacts)',
+                'rows': 3,
                 'contact_range': '006-120 (multiples of 3) or 000 (special)',
                 'contact_rule': 'Multiples of 3 from 6 to 120, or 000 for special mixed-layout',
                 'supports_hfhp': True,
-                'max_hf_hp': 20,
-                'formula': lambda n: f"A = {n} × 2/3 - 2 = {int(n * 2/3) - 2}mm"
+                'valid_counts': [0] + [i for i in range(6, 121) if i % 3 == 0],
+                'max_hfhp_total': 64,
+                'max_hfhp_individual': 64,
+                'hfhp_contact_type': '22',
+                'b_max': 87,
+                'formula': self._formula_series_34
             }
         }
         
+        # Complete termination styles
         self._termination_styles = {
             'Y': {
                 'name': 'Straight PCB',
-                'description': 'Through-hole PCB mounting',
                 'length': '3mm',
-                'pcb_thickness': '0.8-2mm',
+                'description': 'Straight on PCB 0.8-2mm thickness',
                 'valid_for': {'gender': ['1', '2'], 'series': ['10', '20', '22', '32', '34']}
             },
             'YL': {
-                'name': 'Straight PCB Long',
-                'description': 'Through-hole PCB mounting, longer pins',
+                'name': 'Straight PCB',
                 'length': '4.5mm',
-                'pcb_thickness': '1.5-4mm',
+                'description': 'Straight on PCB 1.5-4mm thickness',
+                'valid_for': {'gender': ['1', '2'], 'series': ['10', '20', '22', '32', '34']}
+            },
+            'D': {
+                'name': 'Special Mixed PCB',
+                'description': 'Special termination for HF/HP only configurations on PCB',
+                'valid_for': {'gender': ['1', '2'], 'series': ['22', '32', '34']}
+            },
+            'E': {
+                'name': 'Special Mixed Cable',
+                'description': 'Special termination for HF/HP only configurations on cable',
                 'valid_for': {'gender': ['1', '2'], 'series': ['22', '32', '34']}
             },
             'V': {
                 'name': '90° PCB',
-                'description': 'Right-angle PCB mounting',
                 'length': '3mm',
-                'pcb_thickness': '0.8-2mm',
-                'valid_for': {'gender': ['1'], 'series': ['22', '32', '34']}
+                'description': '90° on PCB 0.8-2mm thickness',
+                'valid_for': {'gender': ['1', '2'], 'series': ['10', '20', '22', '32', '34']}
             },
             'VL': {
-                'name': '90° PCB Long',
-                'description': 'Right-angle PCB mounting, longer pins',
+                'name': '90° PCB',
                 'length': '4.5mm',
-                'pcb_thickness': '1.5-4mm',
-                'valid_for': {'gender': ['1'], 'series': ['22', '32', '34']}
-            },
-            'T': {
-                'name': 'Solder Termination',
-                'description': 'Through-hole solder termination',
-                'valid_for': {'gender': ['2'], 'series': ['22', '32', '34']}
+                'description': '90° on PCB 1.5-4mm thickness',
+                'valid_for': {'gender': ['1', '2'], 'series': ['10', '20', '22', '32', '34']}
             },
             'S': {
                 'name': 'Crimp',
-                'description': 'Crimp termination for cable',
-                'wire_gauge': 'AWG 24-28',
-                'valid_for': {'gender': ['2'], 'series': ['10', '20', '22', '32', '34']}
+                'gauge': '24-28',
+                'description': 'Crimp AWG 24-28',
+                'valid_for': {'gender': ['1', '2'], 'series': ['10', '20', '22', '32', '34']}
             },
             'C': {
                 'name': 'Crimp',
-                'description': 'Crimp termination for cable',
-                'wire_gauge': 'AWG 22',
-                'valid_for': {'gender': ['2'], 'series': ['10', '20', '22', '32', '34']}
-            },
-            'D': {
-                'name': 'Special Mixed-Layout',
-                'description': 'For HF/HP contacts only (no LF)',
-                'valid_for': {'gender': ['1', '2'], 'series': ['22', '32', '34']}
+                'gauge': '22',
+                'description': 'Crimp AWG 22',
+                'valid_for': {'gender': ['1', '2'], 'series': ['10', '20', '22', '32', '34']}
             },
             'PF': {
-                'name': 'Press-Fit',
-                'description': 'Press-fit PCB mounting',
-                'valid_for': {'gender': ['2'], 'series': ['10', '20']}
+                'name': 'Press Fit',
+                'description': 'Press fit termination',
+                'valid_for': {'gender': ['2'], 'series': ['10', '20', '22']}
             },
             'R': {
-                'name': 'SMT 90°',
-                'description': 'Surface mount 90° termination',
+                'name': 'SMT',
+                'description': 'Surface mount technology',
                 'valid_for': {'gender': ['2'], 'series': ['10', '20']}
+            }
+        }
+        
+        # Complete contact type mappings for HF/HP
+        self._contact_types = {
+            'HF': {
+                '30': {
+                    'pcb_straight_3mm': {'code': '1300CMM', 'desc': 'HF Male Straight PCB 3mm', 'male': True},
+                    'pcb_straight_4.5mm': {'code': '130045', 'desc': 'HF Male Straight PCB 4.5mm', 'male': True},
+                    'pcb_90deg_3mm': {'code': '1400CMM', 'desc': 'HF Male 90° PCB 3mm', 'male': True},
+                    'pcb_90deg_4.5mm': {'code': '140045', 'desc': 'HF Male 90° PCB 4.5mm', 'male': True},
+                    'pcb_straight_3mm_f': {'code': '2300CMM', 'desc': 'HF Female Straight PCB 3mm', 'male': False},
+                    'pcb_straight_4.5mm_f': {'code': '230045', 'desc': 'HF Female Straight PCB 4.5mm', 'male': False},
+                    'pcb_90deg_3mm_f': {'code': '2400CMM', 'desc': 'HF Female 90° PCB 3mm', 'male': False},
+                    'pcb_90deg_4.5mm_f': {'code': '240045', 'desc': 'HF Female 90° PCB 4.5mm', 'male': False}
+                },
+                '22': {
+                    'pcb_straight_3mm': {'code': '1300-12', 'desc': 'HF Male Straight PCB 3mm (Series 22)', 'male': True},
+                    'pcb_straight_4.5mm': {'code': '1300-14', 'desc': 'HF Male Straight PCB 4.5mm (Series 22)', 'male': True},
+                    'pcb_90deg_3mm': {'code': '1400-12', 'desc': 'HF Male 90° PCB 3mm (Series 22)', 'male': True},
+                    'pcb_90deg_4.5mm': {'code': '1400-14', 'desc': 'HF Male 90° PCB 4.5mm (Series 22)', 'male': True},
+                    'pcb_straight_3mm_f': {'code': '2300-12', 'desc': 'HF Female Straight PCB 3mm (Series 22)', 'male': False},
+                    'pcb_straight_4.5mm_f': {'code': '2300-14', 'desc': 'HF Female Straight PCB 4.5mm (Series 22)', 'male': False},
+                    'pcb_90deg_3mm_f': {'code': '2400-12', 'desc': 'HF Female 90° PCB 3mm (Series 22)', 'male': False},
+                    'pcb_90deg_4.5mm_f': {'code': '2400-14', 'desc': 'HF Female 90° PCB 4.5mm (Series 22)', 'male': False}
+                }
+            },
+            'HP': {
+                '30': {
+                    'pcb_straight_3mm': {'code': '3300CMM', 'desc': 'HP Male Straight PCB 3mm', 'male': True},
+                    'pcb_straight_4.5mm': {'code': '330045', 'desc': 'HP Male Straight PCB 4.5mm', 'male': True},
+                    'pcb_90deg_3mm': {'code': '3400CMM', 'desc': 'HP Male 90° PCB 3mm', 'male': True},
+                    'pcb_90deg_4.5mm': {'code': '340045', 'desc': 'HP Male 90° PCB 4.5mm', 'male': True},
+                    'pcb_straight_3mm_f': {'code': '4300CMM', 'desc': 'HP Female Straight PCB 3mm', 'male': False},
+                    'pcb_straight_4.5mm_f': {'code': '430045', 'desc': 'HP Female Straight PCB 4.5mm', 'male': False},
+                    'pcb_90deg_3mm_f': {'code': '4400CMM', 'desc': 'HP Female 90° PCB 3mm', 'male': False},
+                    'pcb_90deg_4.5mm_f': {'code': '440045', 'desc': 'HP Female 90° PCB 4.5mm', 'male': False}
+                },
+                '22': {
+                    'pcb_straight_3mm': {'code': '3300-12', 'desc': 'HP Male Straight PCB 3mm (Series 22)', 'male': True},
+                    'pcb_straight_4.5mm': {'code': '3300-14', 'desc': 'HP Male Straight PCB 4.5mm (Series 22)', 'male': True},
+                    'pcb_90deg_3mm': {'code': '3400-12', 'desc': 'HP Male 90° PCB 3mm (Series 22)', 'male': True},
+                    'pcb_90deg_4.5mm': {'code': '3400-14', 'desc': 'HP Male 90° PCB 4.5mm (Series 22)', 'male': True},
+                    'pcb_straight_3mm_f': {'code': '4300-12', 'desc': 'HP Female Straight PCB 3mm (Series 22)', 'male': False},
+                    'pcb_straight_4.5mm_f': {'code': '4300-14', 'desc': 'HP Female Straight PCB 4.5mm (Series 22)', 'male': False},
+                    'pcb_90deg_3mm_f': {'code': '4400-12', 'desc': 'HP Female 90° PCB 3mm (Series 22)', 'male': False},
+                    'pcb_90deg_4.5mm_f': {'code': '4400-14', 'desc': 'HP Female 90° PCB 4.5mm (Series 22)', 'male': False}
+                }
+            }
+        }
+    
+    def _formula_series_10(self, nn, yy=0, zz=0):
+        """Series 10 formula - no HF/HP support"""
+        A = (nn * 2) - 2
+        valid = 2 <= nn <= 25
+        return {
+            'valid': valid,
+            'calculation': f"A = ({nn} × 2) - 2 = {A}mm",
+            'constraint_check': f"Contact count {nn} ∈ [2,25] - {'VALID' if valid else 'INVALID'}",
+            'details': {'A': A, 'contact_count_valid': valid}
+        }
+    
+    def _formula_series_20(self, nn, yy=0, zz=0):
+        """Series 20 formula - no HF/HP support"""
+        A = nn - 2
+        B = A + 4.7  # Corrected from documentation
+        valid = 4 <= nn <= 50 and nn % 2 == 0
+        return {
+            'valid': valid,
+            'calculation': f"A = {nn} - 2 = {A}mm, B = A + 4.7 = {B}mm",
+            'constraint_check': f"Contact count {nn} ∈ [4,50] even - {'VALID' if valid else 'INVALID'}",
+            'details': {'A': A, 'B': B, 'contact_count_valid': valid}
+        }
+    
+    def _formula_series_22(self, nn, yy=0, zz=0):
+        """Series 22 formula with HF/HP support"""
+        yy_num = int(yy) if yy else 0
+        zz_num = int(zz) if zz else 0
+        
+        A = nn - 2
+        B = (yy_num + zz_num) * 4 + A + 7
+        C = A + 12
+        B_max = 65
+        
+        valid_contact_count = (4 <= nn <= 60 and nn % 2 == 0) or nn == 0
+        valid_hfhp = yy_num <= 12 and zz_num <= 12
+        valid_total = (yy_num + zz_num) <= 15
+        valid_dimension = B <= B_max
+        valid = valid_contact_count and valid_hfhp and valid_total and valid_dimension
+        
+        return {
+            'valid': valid,
+            'calculation': f"A = {nn} - 2 = {A}mm, B = ({yy_num}+{zz_num})×4 + A + 7 = {B}mm, C = A + 12 = {C}mm",
+            'constraint_check': f"B ({B}mm) {'≤' if B <= B_max else '>'} B max ({B_max}mm), YY({yy_num}≤12), ZZ({zz_num}≤12), total({yy_num+zz_num}≤15) - {'VALID' if valid else 'INVALID'}",
+            'details': {
+                'A': A, 'B': B, 'C': C, 'B_max': B_max,
+                'contact_count_valid': valid_contact_count,
+                'hfhp_limits_valid': valid_hfhp,
+                'total_limit_valid': valid_total,
+                'dimension_valid': valid_dimension
+            }
+        }
+    
+    def _formula_series_32(self, nn, yy=0, zz=0):
+        """Series 32 formula with HF/HP support"""
+        yy_num = int(yy) if yy else 0
+        zz_num = int(zz) if zz else 0
+        
+        A = math.floor(((yy_num + zz_num) * 4 + nn) * 2 / 3) - 2
+        B = A + 9
+        C = A + 15
+        B_max = 87
+        
+        valid_contact_count = (6 <= nn <= 120 and nn % 3 == 0) or nn == 0
+        valid_hfhp = yy_num <= 20 and zz_num <= 20
+        valid_total = (yy_num + zz_num) <= 20
+        valid_dimension = B <= B_max
+        valid = valid_contact_count and valid_hfhp and valid_total and valid_dimension
+        
+        return {
+            'valid': valid,
+            'calculation': f"A = [((({yy_num}+{zz_num})×4+{nn})×2]/3 - 2 = {A}mm, B = A + 9 = {B}mm, C = A + 15 = {C}mm",
+            'constraint_check': f"B ({B}mm) {'≤' if B <= B_max else '>'} B max ({B_max}mm), YY({yy_num}≤20), ZZ({zz_num}≤20), total({yy_num+zz_num}≤20) - {'VALID' if valid else 'INVALID'}",
+            'details': {
+                'A': A, 'B': B, 'C': C, 'B_max': B_max,
+                'contact_count_valid': valid_contact_count,
+                'hfhp_limits_valid': valid_hfhp,
+                'total_limit_valid': valid_total,
+                'dimension_valid': valid_dimension
+            }
+        }
+    
+    def _formula_series_34(self, nn, yy=0, zz=0):
+        """Series 34 formula with HF/HP support (complex conditional logic)"""
+        yy_num = int(yy) if yy else 0
+        zz_num = int(zz) if zz else 0
+        
+        A = math.floor((nn * 2) / 3) - 2
+        
+        # Complex B calculation based on YY/ZZ combinations
+        if yy_num != 0 and zz_num != 0:
+            B = math.floor(((yy_num + zz_num) / 2) - 2) * 2.5 + 14.5 + A
+            formula_used = f"B = [((({yy_num}+{zz_num})/2-2]×2.5+14.5+A = {B:.1f}mm"
+        elif yy_num != 0 or zz_num != 0:
+            non_zero_value = yy_num if yy_num != 0 else zz_num
+            B = math.floor((non_zero_value / 2) - 1) * 2.5 + 11.75 + A
+            formula_used = f"B = [({non_zero_value}/2-1]×2.5+11.75+A = {B:.1f}mm"
+        else:
+            B = A + 6
+            formula_used = f"B = A + 6 = {B:.1f}mm (no HF/HP)"
+        
+        C = B + 6
+        B_max = 87
+        
+        valid_contact_count = (6 <= nn <= 120 and nn % 3 == 0) or nn == 0
+        valid_hfhp = yy_num <= 64 and zz_num <= 64
+        valid_total = (yy_num + zz_num) <= 64
+        valid_dimension = B <= B_max
+        valid = valid_contact_count and valid_hfhp and valid_total and valid_dimension
+        
+        return {
+            'valid': valid,
+            'calculation': f"A = ({nn}×2)/3 - 2 = {A}mm, {formula_used}, C = B + 6 = {C:.1f}mm",
+            'constraint_check': f"B ({B:.1f}mm) {'≤' if B <= B_max else '>'} B max ({B_max}mm), YY({yy_num}≤64), ZZ({zz_num}≤64), total({yy_num+zz_num}≤64) - {'VALID' if valid else 'INVALID'}",
+            'details': {
+                'A': A, 'B': B, 'C': C, 'B_max': B_max,
+                'contact_count_valid': valid_contact_count,
+                'hfhp_limits_valid': valid_hfhp,
+                'total_limit_valid': valid_total,
+                'dimension_valid': valid_dimension
             }
         }
 
     def _extract_requirements_from_history(self):
+        """Extract requirements from conversation history"""
         if not self._conversation_history:
             return
             
         history_lower = self._conversation_history.lower()
         
+        # Extract series information
         series_patterns = {
-            '10': ['cmm 100', '100 series', 'series 10', 'cmm100', 'cmm-100'],
-            '20': ['cmm 200', '200 series', 'series 20', 'cmm200', 'cmm-200'], 
-            '22': ['cmm 220', '220 series', 'series 22', 'cmm220', 'cmm-220', 'cmm220 series'],
-            '32': ['cmm 320', '320 series', 'series 32', 'cmm320', 'cmm-320'],
-            '34': ['cmm 340', '340 series', 'series 34', 'cmm340', 'cmm-340']
+            '10': r'\b(?:cmm\s*)?100\b|\bseries\s*10\b',
+            '20': r'\b(?:cmm\s*)?200\b|\bseries\s*20\b',
+            '22': r'\b(?:cmm\s*)?220\b|\bseries\s*22\b',
+            '32': r'\b(?:cmm\s*)?320\b|\bseries\s*32\b',
+            '34': r'\b(?:cmm\s*)?340\b|\bseries\s*34\b'
         }
         
-        for series, patterns in series_patterns.items():
-            if any(pattern in history_lower for pattern in patterns):
+        for series, pattern in series_patterns.items():
+            if re.search(pattern, history_lower):
                 self._extracted_requirements['series'] = series
-                print(f"DEBUG: Extracted series {series} from conversation history")
                 break
         
-        # Enhanced contact count extraction with multiple patterns
-        contact_patterns = [
-            r'(\d+)\s*(?:contacts?|pins?|position)',
-            r'need\s*(?:about\s*)?(\d+)',
-            r'require\s*(\d+)',
-            r'(\d+)\s*(?:contact|pin|way)',
-            r'(?:with|have|using)\s*(\d+)',
-            r'about\s*(\d+)\s*(?:contacts?|pins?)'  # NEW: Handle "about 20 contacts"
-        ]
+        # Extract contact count
+        contact_matches = re.findall(r'(\d+)\s*(?:contact|pin)', history_lower)
+        if contact_matches:
+            self._extracted_requirements['contact_count'] = contact_matches[-1]
         
-        for pattern in contact_patterns:
-            matches = re.findall(pattern, history_lower)
-            if matches:
-                # Take the most recent/largest reasonable number
-                contact_count = max([int(m) for m in matches if 2 <= int(m) <= 120])
-                self._extracted_requirements['contact_count'] = str(contact_count)
-                print(f"DEBUG: Extracted contact count {contact_count} from conversation history")
-                break
-   
-        # Extract gender
+        # Extract gender with better logic
         if re.search(r'\bmale\b(?!\s*(?:and|or)\s*female)', history_lower):
             self._extracted_requirements['gender'] = '1'
         elif re.search(r'\bfemale\b(?!\s*(?:and|or)\s*male)', history_lower):
@@ -307,7 +480,7 @@ class ConversationAwarePartNumberTool(BaseTool):
         # Extract application/mounting type
         mounting_keywords = {
             'pcb': 'pcb_mount',
-            'board': 'pcb_mount',
+            'board': 'pcb_mount', 
             'cable': 'cable_mount',
             'wire': 'cable_mount',
             'solder': 'solder',
@@ -329,21 +502,6 @@ class ConversationAwarePartNumberTool(BaseTool):
             self._extracted_requirements['needs_hf'] = True
         if 'high power' in history_lower or 'hp' in history_lower:
             self._extracted_requirements['needs_hp'] = True
-        
-        # Extract power/current requirements
-        power_patterns = [
-            r'(\d+(?:\.\d+)?)\s*(?:amp|a|ampere)',
-            r'(\d+(?:\.\d+)?)\s*(?:watt|w)',
-            r'(\d+(?:\.\d+)?)\s*(?:volt|v)'
-        ]
-        
-        for pattern in power_patterns:
-            match = re.search(pattern, history_lower)
-            if match:
-                value = float(match.group(1))
-                if value >= 10:  # Likely needs HP contacts
-                    self._extracted_requirements['needs_hp'] = True
-                break
 
     def _run(self, query: str) -> str:
         """Main entry point for the tool"""
@@ -360,11 +518,11 @@ class ConversationAwarePartNumberTool(BaseTool):
             return self._provide_contextual_help(query)
 
     def _is_part_number(self, text: str) -> bool:
+        """Enhanced part number detection"""
         text_clean = text.upper().replace('-', '').replace(' ', '')
-        # Match CMM part number patterns more precisely
         patterns = [
-            r'^(10|20|22|32|34)[12][A-Z]+\d+',  
-            r'(10|20|22|32|34)[12][A-Z]+\d+.*', 
+            r'^(10|20|22|32|34)[12][A-Z]+\d+',  # Basic format
+            r'(10|20|22|32|34)[12][A-Z]+\d+.*',  # With additional components
         ]
         return any(re.search(pattern, text_clean) for pattern in patterns)
 
@@ -377,7 +535,6 @@ class ConversationAwarePartNumberTool(BaseTool):
 
     def _is_question_response(self, text: str) -> bool:
         """Check if this is a response to our question"""
-        # Simple heuristics - in real implementation, you'd track conversation state
         response_patterns = [
             r'^\d+$',  # Just a number
             r'^(male|female)$',  # Gender response
@@ -387,110 +544,171 @@ class ConversationAwarePartNumberTool(BaseTool):
         return any(re.match(pattern, text.strip(), re.IGNORECASE) for pattern in response_patterns)
 
     def _validate_contact_count(self, series: str, count: int) -> bool:
-        """Validate contact count for given series"""
-        if series == '10':
-            return 2 <= count <= 25
-        elif series == '20':
-            return 4 <= count <= 50 and count % 2 == 0
-        elif series == '22':
-            return count == 0 or (4 <= count <= 60 and count % 2 == 0)
-        elif series in ['32', '34']:
-            return count == 0 or (6 <= count <= 120 and count % 3 == 0)
-        return False
+        """Enhanced contact count validation"""
+        if series not in self._series_data:
+            return False
+        return count in self._series_data[series]['valid_counts']
 
     def _decode_part_number(self, part_number: str) -> str:
+        """Enhanced part number decoding with full HF/HP support"""
         original_pn = part_number
-        pn = part_number.upper().replace('-', '').replace(' ', '')
+        pn = part_number.upper().replace(' ', '')
         
         try:
             if len(pn) < 4:
                 return f"❌ Part number too short: {original_pn}"
                 
+            # Parse basic components
             series = pn[:2]
             gender = pn[2]
-            termination = pn[3]
             
-            print(f"DEBUG: Parsing '{original_pn}' -> series='{series}', gender='{gender}', termination='{termination}'")
+            # Parse termination (handle multi-character codes)
+            remaining = pn[3:]
+            termination = ''
+            for term_code in ['YL', 'VL', 'PF']:  # Check multi-char first
+                if remaining.startswith(term_code):
+                    termination = term_code
+                    remaining = remaining[len(term_code):]
+                    break
+            if not termination:
+                termination = remaining[0] if remaining else ''
+                remaining = remaining[1:] if remaining else ''
             
-            # Validate series
+            # Validate basic components
             if series not in self._series_data:
-                return f"❌ Invalid series code '{series}'. Valid codes: {', '.join(self._series_data.keys())}"
+                return f"❌ Invalid series code '{series}'. Valid: {list(self._series_data.keys())}"
+            
+            if gender not in ['1', '2']:
+                return f"❌ Invalid gender code '{gender}'. Valid: 1 (Male), 2 (Female)"
+            
+            if termination not in self._termination_styles:
+                return f"❌ Invalid termination code '{termination}'. Valid: {list(self._termination_styles.keys())}"
+            
+            series_info = self._series_data[series]
+            term_info = self._termination_styles[termination]
             
             # Parse contact count
-            if series in ['32', '34']:
-                if len(pn) < 7:
-                    return f"❌ Part number too short for series {series}"
-                contact_count = pn[4:7]
-                next_pos = 7
-            else:
-                if len(pn) < 6:
-                    return f"❌ Part number too short for series {series}"
-                contact_count = pn[4:6]
-                next_pos = 6
-            # Build detailed response
-            response = f"🔍 **Part Number Analysis: {original_pn}**\n\n"
-            series_info = self._series_data[series]
-            response += f"**📋 Series:** {series} - {series_info['name']}\n"
-            response += f"   {series_info['description']}\n"
-            response += f"   Contact Range: {series_info['contact_range']}\n\n"
-            # Gender
-            gender_name = "Male (Plug)" if gender == '1' else "Female (Receptacle)" if gender == '2' else "Unknown"
-            response += f"**🔌 Gender:** {gender} - {gender_name}\n\n"
+            contact_count_length = 3 if series in ['32', '34'] else 2
+            if len(remaining) < contact_count_length:
+                return f"❌ Missing contact count information"
             
-            # Termination
-            if termination in self._termination_styles:
-                term_info = self._termination_styles[termination]
-                response += f"**🔧 Termination:** {termination} - {term_info['name']}\n"
-                response += f"   {term_info['description']}\n"
-                
-                if 'length' in term_info:
-                    response += f"   Pin Length: {term_info['length']}\n"
-                if 'pcb_thickness' in term_info:
-                    response += f"   PCB Thickness: {term_info['pcb_thickness']}\n"
-                if 'wire_gauge' in term_info:
-                    response += f"   Wire Gauge: {term_info['wire_gauge']}\n"
-                response += "\n"
+            contact_count_str = remaining[:contact_count_length]
+            remaining = remaining[contact_count_length:]
             
-            # Contact count
-            response += f"**📍 LF Contacts:** {contact_count}\n"
+            try:
+                contact_count = int(contact_count_str)
+            except ValueError:
+                return f"❌ Invalid contact count '{contact_count_str}'"
             
             # Validate contact count
-            if self._validate_contact_count(series, int(contact_count) if contact_count != '00' else 0):
-                response += f"   ✅ Valid for {series_info['name']}\n"
-            else:
-                response += f"   ❌ Invalid for {series_info['name']} (Expected: {series_info['contact_range']})\n"
+            if not self._validate_contact_count(series, contact_count):
+                return f"❌ Invalid contact count {contact_count} for {series_info['name']}. Expected: {series_info['contact_range']}"
             
-            # Parse remaining components
-            if len(pn) > next_pos:
-                remaining = pn[next_pos:]
-                response += f"\n**🔩 Additional Components:** {remaining}\n"
-                
-                # Try to parse fixing hardware and HF/HP
-                hardware_match = re.match(r'^([A-Z]\d+)', remaining)
-                if hardware_match:
-                    response += f"   Fixing Hardware: {hardware_match.group(1)}\n"
-                
-                # Check for HF/HP section (after dash)
-                if '-' in original_pn:
-                    hf_hp_section = original_pn.split('-', 1)[1]
-                    response += f"   HF/HP Section: {hf_hp_section}\n"
+            # Build response
+            response = f"✅ **Decoded Part Number: {original_pn}**\n\n"
+            response += f"**🔍 Basic Components:**\n"
+            response += f"• **Series:** {series} - {series_info['name']} ({series_info['description']})\n"
+            response += f"• **Gender:** {gender} - {'Male' if gender == '1' else 'Female'}\n"
+            response += f"• **Termination:** {termination} - {term_info['name']}"
+            if 'length' in term_info:
+                response += f" ({term_info['length']})"
+            response += f" - {term_info['description']}\n"
+            response += f"• **LF Contact Count:** {contact_count}"
+            if contact_count == 0:
+                response += " (Special - No LF contacts)"
+            response += "\n"
             
-            # Add dimensional formula if available
-            if 'formula' in series_info:
-                try:
-                    contacts_num = int(contact_count) if contact_count != '00' else 0
-                    if contacts_num > 0:
-                        formula = series_info['formula'](contacts_num)
-                        response += f"\n**📐 Dimensions:** {formula}\n"
-                except:
-                    pass
+            # Parse remaining components (hardware + HF/HP)
+            hardware = ''
+            yy_contacts = 0
+            zz_contacts = 0
+            hf_hp_parts = []
+            
+            if remaining:
+                if '-' in remaining:
+                    parts = remaining.split('-')
+                    hardware = parts[0] if parts[0] else ''
+                    
+                    # Parse HF/HP section
+                    if len(parts) > 1:
+                        hf_hp_section = '-'.join(parts[1:])
+                        yy_contacts, zz_contacts, hf_hp_parts = self._parse_hfhp_section(hf_hp_section, contact_count == 0)
+                else:
+                    hardware = remaining
+            
+            if hardware:
+                response += f"• **Fixing Hardware:** {hardware}\n"
+            
+            # Display HF/HP information if present
+            if yy_contacts > 0 or zz_contacts > 0:
+                response += f"\n**⚡ HF/HP Configuration:**\n"
+                if yy_contacts > 0:
+                    response += f"• **YY Side (LF pin 1 side):** {yy_contacts} contacts\n"
+                if zz_contacts > 0:
+                    response += f"• **ZZ Side (opposite LF pin 1):** {zz_contacts} contacts\n"
+                response += f"• **Total HF/HP:** {yy_contacts + zz_contacts} contacts\n"
+                
+                if hf_hp_parts:
+                    response += f"• **HF/HP Part Numbers:** {', '.join(hf_hp_parts)}\n"
+            
+            # Validate with formulas if series supports it
+            if hasattr(self, f"_formula_series_{series}"):
+                formula_result = getattr(self, f"_formula_series_{series}")(contact_count, yy_contacts, zz_contacts)
+                
+                response += f"\n**📐 Dimensional Validation:**\n"
+                response += f"• **Formula:** {formula_result['calculation']}\n"
+                response += f"• **Constraints:** {formula_result['constraint_check']}\n"
+                
+                if not formula_result['valid']:
+                    response += f"\n⚠️ **Warning:** This part number violates design constraints and may not be manufacturable!"
             
             return response
             
         except Exception as e:
             return f"❌ Error decoding part number: {str(e)}\n\nPlease check the format and try again."
 
+    def _parse_hfhp_section(self, hfhp_section: str, is_special: bool):
+        """Parse the HF/HP section (YY/ZZ structure)"""
+        parts = hfhp_section.split('-')
+        yy_contacts = 0
+        zz_contacts = 0
+        hf_hp_parts = []
+        
+        try:
+            if parts and len(parts[0]) >= 2:
+                if is_special and len(parts) == 2:
+                    # Special format: total contacts only
+                    total_contacts = int(parts[0][:2])
+                    yy_contacts = total_contacts
+                    zz_contacts = 0
+                    hf_hp_parts = [parts[1]]
+                elif len(parts[0]) >= 4:
+                    # Standard format: YYZZ
+                    yy_contacts = int(parts[0][:2])
+                    zz_contacts = int(parts[0][2:4])
+                    hf_hp_parts = parts[1:] if len(parts) > 1 else []
+        except (ValueError, IndexError):
+            pass
+        
+        return yy_contacts, zz_contacts, hf_hp_parts
+
+    def _get_contact_description(self, part_number: str) -> str:
+        """Get description for HF/HP contact part number"""
+        if not part_number:
+            return ''
+        
+        # Search through all contact types
+        for contact_type in ['HF', 'HP']:
+            for series_type in ['30', '22']:
+                type_data = self._contact_types.get(contact_type, {}).get(series_type, {})
+                for config, info in type_data.items():
+                    if info['code'] == part_number:
+                        return f"{contact_type} - {info['desc']}"
+        
+        return f"Unknown contact type: {part_number}"
+
     def _handle_generation_request(self, query: str) -> str:
+        """Enhanced generation with complete series support"""
         known_info = []
         if self._extracted_requirements:
             known_info.append("📋 **Information from our conversation:**")
@@ -504,7 +722,15 @@ class ConversationAwarePartNumberTool(BaseTool):
                     known_info.append(f"   Contacts: {value}")
                 elif key == 'application':
                     known_info.append(f"   Application: {value.replace('_', ' ').title()}")
+                elif key == 'needs_hf':
+                    known_info.append(f"   Needs: High Frequency (HF) contacts")
+                elif key == 'needs_hp':
+                    known_info.append(f"   Needs: High Power (HP) contacts")
             known_info.append("")
+        
+        # Check if we can generate a complete part number
+        if all(req in self._extracted_requirements for req in ['series', 'gender', 'contact_count']):
+            return self._generate_complete_part_number()
         
         # Determine next question
         next_question = self._get_next_required_question()
@@ -517,64 +743,15 @@ class ConversationAwarePartNumberTool(BaseTool):
         
         return response
 
-    def _get_next_required_question(self) -> str:
-        """Get the next question needed for part number generation"""
-        
-        if 'series' not in self._extracted_requirements:
-            return """**❓ What series do you need?**
-
-• **10 - CMM 100**: 1 row, 02-25 contacts, basic applications
-• **20 - CMM 200**: 2 rows, 04-50 contacts (even), higher density  
-• **22 - CMM 220**: 2 rows, 04-60 contacts (even), supports HF/HP
-• **32 - CMM 320**: 2 rows, 006-120 contacts (multiples of 3), supports HF/HP
-• **34 - CMM 340**: 2 rows, 006-120 contacts (multiples of 3), supports HF/HP
-
-Please specify the series number or describe your application requirements."""
-
-        elif 'gender' not in self._extracted_requirements:
-            return """**❓ What gender do you need?**
-
-• **Male (1)**: Plug connector with pins
-• **Female (2)**: Receptacle connector with sockets
-
-Please specify Male or Female."""
-
-        elif 'application' not in self._extracted_requirements:
-            return """**❓ How will this connector be mounted/terminated?**
-
-• **PCB mounting**: Straight or 90° pins for circuit board
-• **Cable termination**: Crimp contacts for wires
-• **Solder termination**: Through-hole soldering
-• **Special mixed-layout**: HF/HP contacts only
-
-Please describe your mounting/termination preference."""
-
-        elif 'contact_count' not in self._extracted_requirements:
-            series = self._extracted_requirements.get('series', '22')
-            series_info = self._series_data[series]
-            return f"""**❓ How many contacts do you need?**
-
-For {series_info['name']}: {series_info['contact_range']}
-{series_info['contact_rule']}
-
-Please specify the number of contacts."""
-
-        else:
-            return self._attempt_generation()
-
-    def _attempt_generation(self) -> str:
-        """Try to generate part number with current information"""
+    def _generate_complete_part_number(self) -> str:
+        """Generate a complete part number from extracted requirements"""
         try:
-            series = self._extracted_requirements.get('series', '')
-            gender = self._extracted_requirements.get('gender', '')
-            contact_count = self._extracted_requirements.get('contact_count', '')
-            application = self._extracted_requirements.get('application', '')
+            series = self._extracted_requirements['series']
+            gender = self._extracted_requirements['gender']
+            contact_count = self._extracted_requirements['contact_count']
             
-            # Determine termination style from application
-            termination = self._determine_termination(gender, application)
-            
-            if not all([series, gender, termination, contact_count]):
-                return "❌ Still missing some required information. Please provide the missing details."
+            # Determine termination based on application
+            termination = self._determine_termination(gender, self._extracted_requirements.get('application', ''))
             
             # Validate contact count
             if not self._validate_contact_count(series, int(contact_count)):
@@ -598,11 +775,11 @@ Please specify the number of contacts."""
             response += f"• Contacts: {contact_count}\n\n"
             
             # Add dimensional calculation
-            if 'formula' in self._series_data[series]:
+            if hasattr(self, f"_formula_series_{series}"):
                 try:
-                    formula = self._series_data[series]['formula'](int(contact_count))
-                    response += f"**📐 Dimensions:** {formula}\n\n"
-                except:
+                    formula_result = getattr(self, f"_formula_series_{series}")(int(contact_count))
+                    response += f"**📐 Dimensions:** {formula_result['calculation']}\n\n"
+                except Exception:
                     pass
             
             # Ask about optional components
@@ -625,6 +802,51 @@ Please specify the number of contacts."""
         except Exception as e:
             return f"❌ Error generating part number: {str(e)}"
 
+    def _get_next_required_question(self) -> str:
+        """Get the next question needed for part number generation"""
+        
+        if 'series' not in self._extracted_requirements:
+            return """**❓ What series do you need?**
+
+• **CMM 100 (Series 10)** - 1 row, 2-25 contacts, basic applications
+• **CMM 200 (Series 20)** - 2 rows, 4-50 contacts, higher density
+• **CMM 220 (Series 22)** - 2 rows, 4-60 contacts + HF/HP support
+• **CMM 320 (Series 32)** - 3 rows, 6-120 contacts + HF/HP support  
+• **CMM 340 (Series 34)** - 3 rows, 6-120 contacts + advanced HF/HP support
+
+Example: "I need series 22" or "CMM 220"""
+        
+        elif 'gender' not in self._extracted_requirements:
+            return """**❓ Do you need male or female connectors?**
+
+• **Male** - Has pins/plugs
+• **Female** - Has sockets/receptacles
+
+Example: "Male" or "Female"""
+        
+        elif 'contact_count' not in self._extracted_requirements:
+            series = self._extracted_requirements['series']
+            series_info = self._series_data[series]
+            return f"""**❓ How many LF (Low Frequency) contacts do you need?**
+
+For {series_info['name']}: {series_info['contact_range']}
+Rule: {series_info['contact_rule']}
+
+Example: "20 contacts" or just "20" """
+        
+        elif 'application' not in self._extracted_requirements:
+            return """**❓ What's your mounting/connection type?**
+
+• **PCB mount** - Straight or 90° to circuit board
+• **Cable mount** - Connection to wires/cables
+• **SMT** - Surface mount technology
+• **Crimp** - Crimp-on termination
+
+Example: "PCB mount" or "Cable mount" """
+        
+        else:
+            return "I have enough information to generate your part number!"
+
     def _determine_termination(self, gender: str, application: str) -> str:
         """Determine termination style based on application"""
         if application == 'pcb_mount':
@@ -642,7 +864,6 @@ Please specify the number of contacts."""
 
     def _handle_question_response(self, query: str) -> str:
         """Handle responses to our questions"""
-        # This would be expanded to handle specific responses
         return self._handle_generation_request(query)
 
     def _provide_contextual_help(self, query: str) -> str:
@@ -652,9 +873,9 @@ Please specify the number of contacts."""
         if 'decode' in query_lower or 'meaning' in query_lower:
             return """🔍 **Part Number Decoding**
 
-I can decode CMM part numbers for you. Just provide the part number (e.g., "221Y20F24") and I'll explain each component.
+I can decode CMM part numbers for you. Just provide the part number (e.g., "221Y20F24") and I'll explain each component including HF/HP configurations.
 
-Format: `[Series][Gender][Termination][Contacts][Hardware][HF/HP]`"""
+Format: `[Series][Gender][Termination][Contacts][Hardware][-YY/ZZ-HF/HP Parts]`"""
 
         elif 'generate' in query_lower or 'create' in query_lower:
             return """🚀 **Part Number Generation** 
@@ -664,15 +885,21 @@ I can help you generate a CMM part number by asking smart questions. I'll review
 Just say "I need a part number" or "generate a part number" to start!"""
 
         else:
-            return """🎯 **CMM Part Numbering Assistant**
+            return """🎯 **Enhanced CMM Part Numbering Assistant**
 
 I can help you with:
-• **Decode** existing part numbers (explain what each part means)
-• **Generate** new part numbers (smart questioning with conversation memory)
-• **Validate** part numbers and check compatibility
+• **Decode** existing part numbers (including complex HF/HP configurations)
+• **Generate** new part numbers (with full validation and dimensional checking)
+• **Validate** part numbers against engineering constraints
+
+**Advanced Features:**
+• Complete HF/HP contact support for series 22, 32, 34
+• Dimensional formula validation with constraint checking
+• YY/ZZ contact structure parsing
+• Hardware component recognition
 
 Try:
-• "What does 221Y20F24 mean?"
+• "What does 221Y36M12-0501-1300CMM-3400CMM mean?"
 • "I need a part number for my application"
 • "Generate a CMM part number"
 
@@ -1554,7 +1781,7 @@ def create_isolated_agent(tools):
     top_k=12, 
     base_url=NICOMIND_BASE_URL,
     cache=False,
-    client_kwargs={"timeout": 700,
+    client_kwargs={"timeout": 1200,
     "headers": {  
             "Authorization": f"Bearer {NICOMIND_API_KEY}"
         }})    
