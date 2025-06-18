@@ -62,10 +62,11 @@ import queue
 from functools import lru_cache
 import urllib.parse
 from llama_index.llms.langchain import LangChainLLM
+load_dotenv()
 
 ## Necessary declaration and initialization of API keys
-TAVILY_API_KEY = "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"
-SERPER_API_KEY = "a49f2db4b8df6ffba254aacc9a7d4dded2f50c1c"
+TAVILY_API_KEY = os.getenv("TAVILY_API_KEY")
+SERPER_API_KEY = os.getenv("SERPER_API_KEY")
 tavily_client = TavilyClient(api_key=TAVILY_API_KEY)
 serper_client = GoogleSerperAPIWrapper(serper_api_key=SERPER_API_KEY) 
 ddg_search = DuckDuckGoSearchAPIWrapper()
@@ -85,21 +86,26 @@ app.add_middleware(
 app.mount("/static", StaticFiles(directory="static"), name="static")
 POSTGRES_HOST = os.getenv("POSTGRES_HOST", "postgres") 
 POSTGRES_USER = os.getenv("POSTGRES_USER", "postgres")
-POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD", "aspirine13z")
+POSTGRES_PASSWORD = os.getenv("POSTGRES_PASSWORD")
+if not POSTGRES_PASSWORD:
+    raise ValueError("POSTGRES_PASSWORD environment variable is required")
 POSTGRES_DB = os.getenv("POSTGRES_DB", "test1")
-
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "ollama") 
 OLLAMA_PORT = os.getenv("OLLAMA_PORT", "11434")
 OLLAMA_BASE_URL = f"http://{OLLAMA_HOST}:{OLLAMA_PORT}"
 ## Langsmith monitoring
-load_dotenv()
 os.environ["SERPER_API_KEY"] = SERPER_API_KEY
 os.environ["TAVILY_API_KEY"] = TAVILY_API_KEY
 os.environ["LANGCHAIN_TRACING_V2"] = "true"
-os.environ["LANGCHAIN_API_KEY"] = "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"
+LANGCHAIN_API_KEY = os.getenv("LANGCHAIN_API_KEY")
+if not LANGCHAIN_API_KEY:
+    raise ValueError("LANGCHAIN_API_KEY environment variable is required")
+os.environ["LANGCHAIN_API_KEY"] = LANGCHAIN_API_KEY
 os.environ["LANGCHAIN_PROJECT"] = "SQL_memory"
 os.environ["LANGCHAIN_ENDPOINT"] = "https://api.smith.langchain.com"
-NICOMIND_API_KEY = os.getenv("NICOMIND_API_KEY", "eKQduRkL3J0Fc2hvtJPbRjirNj26nIclgEIVNd")
+NICOMIND_API_KEY = os.getenv("NICOMIND_API_KEY")
+if not NICOMIND_API_KEY:
+    raise ValueError("NICOMIND_API_KEY environment variable is required")
 NICOMIND_BASE_URL = "https://api.nicomind.com" 
 
 ## Global variables to hold data
@@ -1053,18 +1059,18 @@ class LLMConnectorSelector:
     def __init__(self):
         ## Chatmodel
         self.llm = ChatOllama(
-            model="gemma3:27b-16k-ctx", 
-            temperature=0.1, 
-            disable_streaming=True,
-            num_ctx=15012, 
-            top_p=0.85, 
-            top_k=12, 
-            base_url=NICOMIND_BASE_URL,
-            cache=False,
-            client_kwargs={"timeout": 700,
+    model="gemma3:27b-16k-ctx", 
+    temperature=0.1, 
+    disable_streaming=True,    
+    num_ctx=15012, 
+    top_p=0.85, 
+    top_k=12, 
+    base_url=NICOMIND_BASE_URL,
+    cache=False,
+    client_kwargs={"timeout": 700,
     "headers": {  
             "Authorization": f"Bearer {NICOMIND_API_KEY}"
-        }})   
+        }}) 
         ## Structure for the LLM response
         self.response_schemas = [ResponseSchema(name="value", description="The parsed value from user response"),ResponseSchema(name="confidence", description="Confidence score between 0 and 1"),
                                   ResponseSchema(name="reasoning", description="Explanation of the parsing logic")]
@@ -1252,12 +1258,12 @@ class LLMConnectorSelector:
                 'text': 'What are your height or space constraints (in mm)?',
                 'weight': 10, 
                 'attribute': 'height_requirement',
-                'clarification': 'Available heights/widths: AMM (4.0mm), EMM (4.6mm), CMM (5.5mm/7.7mm), DMM (5.0mm/7.0mm)',
+                'clarification': 'Available heights/widths: AMM (4.0mm), EMM (4.6mm), CMM (3.5mm, 4mm, 5.5mm, 6mm, 7.7mm, 8mm), DMM (5.0mm, 6.2mm, 7.0mm, 8.2mm, 9.0mm, 9.2mm, 9.65mm, 10.1mm, 10.2mm, 10.5mm, 10.55mm, 11.0mm, 11.45mm, 11.5mm, 11.9mm, 12.0mm, 12.2mm, 12.35mm, 12.5mm, 12.8mm, 13.0mm, 13.25mm, 13.5mm, 13.7mm, 14.0mm, 14.15mm, 14.5mm, 14.6mm, 15.0mm, 15.05mm, 15.5mm, 16.0mm, 16.5 mm, 17.0mm,17.5mm)',
                 'parse_prompt': """Extract the height/width requirement from the user's response. 
                 Look for:
                 - Exact measurements (e.g., "5mm", "4.6 millimeters")
                 - Range specifications (e.g., "under 5mm", "maximum 6mm")
-                - Dimensional constraints (e.g., "50x5mm", "space of 5mm")
+                - Dimensional constraints (e.g., "10x4", "50x5mm", "space of 5mm")
                 Return the height value in millimeters.""",
                 'order': 6
             },
@@ -1656,7 +1662,7 @@ class LLMConnectorSelector:
             try:
                 response = await asyncio.wait_for(
                     self.llm.agenerate([[system_message, user_message]]),
-                    timeout=700 
+                    timeout=10  
                 )
                 response_text = response.generations[0][0].text.strip()
             except (asyncio.TimeoutError, Exception) as e:
@@ -2480,133 +2486,67 @@ class LLMConnectorSelector:
             "reasoning": "Fallback: Could not confidently parse the response"
         }
     def _aggressive_fallback_parse(self, response: str, question: Dict) -> Dict:
-        
-        if question['attribute'] == 'height_requirement':
-            return self.parse_space_constraints(response)
-        
         # For pitch size, look for any number followed by mm
         if question['attribute'] == 'pitch_size':
-            pitch_patterns = [
-                r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)\s*pitch',
-                r'pitch\s*(?:size|of)?\s*(?:is|:)?\s*(\d+(?:\.\d+)?)',
-                r'(\d+(?:\.\d+)?)\s*mm\s*(?:pitch|spacing)',
-                r'pitch\s*(?:of)?\s*(\d+(?:\.\d+)?)',
-                r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)(?:\s|$)', 
-                r'^(\d+(?:\.\d+)?)$' 
-            ]
-            
-            for pattern in pitch_patterns:
-                pitch_match = re.search(pattern, response.lower())
-                if pitch_match:
-                    try:
-                        pitch_size = float(pitch_match.group(1))
-                        if 0.5 <= pitch_size <= 2.5:
-                            return {"value": pitch_size, "confidence": 0.8, "reasoning": f"Extracted pitch size: {pitch_size}mm"}
-                        else:
-                            return {"value": pitch_size, "confidence": 0.5, "reasoning": f"Extracted unusual pitch size: {pitch_size}mm"}
-                    except (ValueError, IndexError):
-                        continue
+            pitch_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)', response.lower())
+            if pitch_match:
+                try:
+                    pitch = float(pitch_match.group(1))
+                    # Common pitch sizes
+                    common_pitches = [1.0, 1.27, 2.0]
+                    # Find closest common pitch
+                    closest_pitch = min(common_pitches, key=lambda x: abs(x - pitch))
+                    return {
+                        "value": closest_pitch,
+                        "confidence": 0.6,
+                        "reasoning": f"Approximated to standard pitch size {closest_pitch}mm"
+                    }
+                except (ValueError, IndexError):
+                    pass
+                    
+            # If no number with mm, check for standard pitch mentions
+            if "1mm" in response.lower() or "1 mm" in response.lower():
+                return {"value": 1.0, "confidence": 0.6, "reasoning": "Matched '1mm' in response"}
+            elif "1.27mm" in response.lower() or "1.27 mm" in response.lower():
+                return {"value": 1.27, "confidence": 0.6, "reasoning": "Matched '1.27mm' in response"}
+            elif "2mm" in response.lower() or "2 mm" in response.lower():
+                return {"value": 2.0, "confidence": 0.6, "reasoning": "Matched '2mm' in response"}
         
-        # Enhanced pin count parsing
-        elif question['attribute'] == 'pin_count':
-            pin_patterns = [
-                r'(\d+)\s*(?:pins?|contacts?)',
-                r'(?:pins?|contacts?)\s*(?::|is|=)?\s*(\d+)',
-                r'^(\d+)$' 
-            ]
-            
-            for pattern in pin_patterns:
-                pin_match = re.search(pattern, response.lower())
-                if pin_match:
-                    try:
-                        pin_count = int(pin_match.group(1))
-                        if 2 <= pin_count <= 120:
-                            return {"value": pin_count, "confidence": 0.8, "reasoning": f"Extracted pin count: {pin_count}"}
-                        else:
-                            return {"value": pin_count, "confidence": 0.5, "reasoning": f"Extracted pin count outside typical range: {pin_count}"}
-                    except (ValueError, IndexError):
-                        continue
-        
-        # Enhanced housing material parsing
+        # For housing_material with aggressive matching
         elif question['attribute'] == 'housing_material':
             response_lower = response.lower()
-            if any(word in response_lower for word in ['metal', 'metallic', 'aluminium', 'aluminum', 'steel', 'emi', 'shield']):
-                return {"value": "metal", "confidence": 0.8, "reasoning": "Detected metal housing preference"}
-            elif any(word in response_lower for word in ['plastic', 'polymer', 'composite', 'non-metal']):
-                return {"value": "plastic", "confidence": 0.8, "reasoning": "Detected plastic housing preference"}
-        
-        # Enhanced right_angle parsing
-        elif question['attribute'] == 'right_angle':
-            response_lower = response.lower()
-            if any(word in response_lower for word in ['right', 'angle', '90', 'ninety', 'parallel', 'angled']):
-                return {"value": True, "confidence": 0.7, "reasoning": "Detected right-angle preference"}
-            elif any(word in response_lower for word in ['straight', 'direct', 'vertical', 'perpendicular']):
-                return {"value": False, "confidence": 0.7, "reasoning": "Detected straight connector preference"}
-        
-        # Enhanced current parsing
-        elif question['attribute'] == 'max_current':
-            current_patterns = [
-                r'(\d+(?:\.\d+)?)\s*(?:a|amp|amps|ampere)',
-                r'current\s*(?::|is|=)?\s*(\d+(?:\.\d+)?)',
-                r'^(\d+(?:\.\d+)?)$'  # Just the number
-            ]
             
-            for pattern in current_patterns:
-                current_match = re.search(pattern, response.lower())
-                if current_match:
-                    try:
-                        current = float(current_match.group(1))
-                        return {"value": current, "confidence": 0.7, "reasoning": f"Extracted current: {current}A"}
-                    except (ValueError, IndexError):
-                        continue
-        
-        # Enhanced temperature parsing
+            # Check for preference indicators
+            preference_terms = ['prefer', 'preferable', 'ideally', 'better', 'if possible', 'would like']
+            is_preference = any(term in response_lower for term in preference_terms)
+            
+            if any(word in response_lower for word in ['metal', 'metallic', 'alumin', 'steel', 'emi', 'shield']):
+                confidence = 0.85 if is_preference else 0.95
+                return {"value": "metal", "confidence": confidence, 
+                        "reasoning": "Matched metal-related terms" + (" (as preference)" if is_preference else "")}
+            else:
+                # Default to plastic if no metal indication
+                confidence = 0.85 if is_preference else 0.95
+                return {"value": "plastic", "confidence": confidence, 
+                        "reasoning": "Defaulted to plastic as no metal indicators found" + (" (as preference)" if is_preference else "")}
+            
+        # For temperature, extract any number before C or degrees
         elif question['attribute'] == 'temp_range':
-            temp_patterns = [
-                r'(\d+(?:\.\d+)?)\s*(?:°c|celsius|degrees?)',
-                r'temp\w*\s*(?::|is|=)?\s*(\d+(?:\.\d+)?)',
-                r'^(\d+(?:\.\d+)?)$'  # Just the number
-            ]
-            
-            for pattern in temp_patterns:
-                temp_match = re.search(pattern, response.lower())
-                if temp_match:
-                    try:
-                        temp = float(temp_match.group(1))
-                        return {"value": temp, "confidence": 0.6, "reasoning": f"Extracted temperature {temp}°C from response"}
-                    except (ValueError, IndexError):
-                        continue
+            temp_match = re.search(r'(\d+(?:\.\d+)?)\s*(?:c|celsius|°c|degrees?)', response.lower())
+            if temp_match:
+                try:
+                    temp = float(temp_match.group(1))
+                    return {"value": temp, "confidence": 0.6, "reasoning": f"Extracted temperature {temp}°C from response"}
+                except (ValueError, IndexError):
+                    pass
         
-        # Enhanced wire gauge parsing
-        elif question['attribute'] == 'wire_gauge':
-            awg_patterns = [
-                r'awg\s*(\d+)',
-                r'(\d+)\s*awg',
-                r'gauge\s*(\d+)',
-                r'^(\d+)$'  
-            ]
-            
-            for pattern in awg_patterns:
-                awg_match = re.search(pattern, response.lower())
-                if awg_match:
-                    try:
-                        awg = int(awg_match.group(1))
-                        if 10 <= awg <= 30:  
-                            return {"value": f"AWG{awg}", "confidence": 0.7, "reasoning": f"Extracted wire gauge: AWG{awg}"}
-                        else:
-                            return {"value": f"AWG{awg}", "confidence": 0.5, "reasoning": f"Extracted unusual wire gauge: AWG{awg}"}
-                    except (ValueError, IndexError):
-                        continue
-        
-        default_values = {
-            'pitch_size': 2.0,  
+        default_values = {'pitch_size': 2.0,  
             'housing_material': 'plastic',  
             'right_angle': True,  
             'pin_count': 20,  
             'max_current': 5.0,
             'temp_range': 85.0,
-            'connection_type': 'PCB-to-PCB'
-        }
+            'connection_type': 'PCB-to-PCB'}
         
         if question['attribute'] in default_values:
             return {"value": default_values[question['attribute']],
@@ -2617,132 +2557,10 @@ class LLMConnectorSelector:
         return {"value": None,
             "confidence": 0.0,
             "reasoning": "Could not determine a value even with aggressive fallback"}
-
-
-    def _simple_fallback_parse(self, response: str, question: Dict) -> Dict:
-        
-        if question['attribute'] == 'height_requirement':
-            return self.parse_space_constraints(response)
-        
-        if question['attribute'] == 'pitch_size':
-            pitch_values = [1.0, 1.27, 2.0]
-            for pitch in pitch_values:
-                if str(pitch) in response or f"{pitch:.1f}" in response:
-                    return {
-                        "value": pitch,
-                        "confidence": 0.8,
-                        "reasoning": f"Matched standard pitch size {pitch}mm in response"}
-            
-            # Try to extract any number as pitch
-            numbers = re.findall(r'\d+\.?\d*', response)
-            for num_str in numbers:
-                try:
-                    num = float(num_str)
-                    if 0.5 <= num <= 2.5:
-                        return {
-                            "value": num,
-                            "confidence": 0.6,
-                            "reasoning": f"Extracted potential pitch size {num}mm"}
-                except ValueError:
-                    continue
-        
-        elif question['attribute'] == 'pin_count':
-            # Extract numeric values
-            numbers = re.findall(r'\b\d+\b', response)
-            if numbers:
-                try:
-                    pin_count = int(numbers[0])
-                    if 1 <= pin_count <= 200:
-                        return {
-                            "value": pin_count,
-                            "confidence": 0.7,
-                            "reasoning": f"Extracted pin count {pin_count} from response"
-                        }
-                except (ValueError, IndexError):
-                    pass
-        
-        elif question['attribute'] == 'housing_material':
-            # Check for housing material keywords
-            response_lower = response.lower()
-            if 'metal' in response_lower:
-                return {
-                    "value": "metal",
-                    "confidence": 0.8,
-                    "reasoning": "User mentioned metal housing"}
-            elif 'plastic' in response_lower:
-                return {
-                    "value": "plastic",
-                    "confidence": 0.8,
-                    "reasoning": "User mentioned plastic housing"}
-            elif 'emi' in response_lower or 'shield' in response_lower:
-                return {
-                    "value": "metal",
-                    "confidence": 0.7,
-                    "reasoning": "User mentioned EMI or shielding, which implies metal housing"}
-        
-        elif question['attribute'] == 'max_current':
-            # Look for current values
-            numbers = re.findall(r'\d+\.?\d*', response)
-            for num_str in numbers:
-                try:
-                    num = float(num_str)
-                    if 0.1 <= num <= 50:  # Reasonable current range
-                        return {
-                            "value": num,
-                            "confidence": 0.6,
-                            "reasoning": f"Extracted potential current {num}A"}
-                except ValueError:
-                    continue
-        
-        elif question['attribute'] == 'temp_range':
-            # Look for temperature values
-            numbers = re.findall(r'\d+\.?\d*', response)
-            for num_str in numbers:
-                try:
-                    num = float(num_str)
-                    if -40 <= num <= 200: 
-                        return {
-                            "value": num,
-                            "confidence": 0.6,
-                            "reasoning": f"Extracted potential temperature {num}°C"}
-                except ValueError:
-                    continue
-        
-        # For yes/no questions
-        if question['text'].endswith('?'):
-            response_lower = response.lower()
-            if any(word in response_lower for word in ['yes', 'yeah', 'yep', 'correct', 'right', 'true']):
-                return {
-                    "value": True,
-                    "confidence": 0.7,
-                    "reasoning": "User responded affirmatively"}
-            elif any(word in response_lower for word in ['no', 'nope', 'not', 'don\'t', 'dont', 'false']):
-                return {
-                    "value": False,
-                    "confidence": 0.7,
-                    "reasoning": "User responded negatively"}
-        
-        # General fallback for any response
-        response_lower = response.lower()
-        if any(phrase in response_lower for phrase in ["i dont know", "i don't know", "unknown", "unclear", "not sure"]):
-            return {
-                "value": None,
-                "confidence": 0.0,
-                "reasoning": "User explicitly expressed uncertainty"
-            }
-        
-        # Return low confidence for other cases
-        return {
-            "value": response.strip(),
-            "confidence": 0.4,
-            "reasoning": "Fallback: Could not confidently parse the response"
-        }
     ## Understand user message with this and them grade confidence score
     async def parse_response_with_llm(self, response: str, question: Dict) -> Dict:
         try:
-            # Special handling for height_requirement
-            if question['attribute'] == 'height_requirement':
-                return self.parse_space_constraints(response)
+           
             # Handle other question types with the LLM
             system_message = SystemMessage(content=self.system_prompt)
             
@@ -2766,7 +2584,7 @@ class LLMConnectorSelector:
             try:
                 llm_response = await asyncio.wait_for(
                     self.llm.agenerate([messages]), 
-                    timeout=700.0 
+                    timeout=10.0 
                 )
                 response_text = llm_response.generations[0][0].text
                 
@@ -2817,34 +2635,15 @@ class LLMConnectorSelector:
             
             # Skip location/panel mount question for PCB-to-PCB (always on-board)
             questions_to_skip.add('location')
-            # Skip current question for PCB-to-PCB (no high current cables)
-            questions_to_skip.add('max_current')
+            
             # Mark these as answered with default values
             if 'wire_gauge' not in self.answers:
                 self.answers['wire_gauge'] = (None, 0.0)
                 self.asked_questions.add('wire_gauge')
                 
             if 'location' not in self.answers:
-                self.answers['location'] = ("internal", 0.95) 
+                self.answers['location'] = ("internal", 0.95)  # PCB-to-PCB is always internal/on-board
                 self.asked_questions.add('location')
-            
-            if 'max_current' not in self.answers:
-                self.answers['max_current'] = (5.0, 0.8) 
-                self.asked_questions.add('max_current')
-        
-        if 'wire_gauge' in self.answers and 'wire_gauge' in self.asked_questions:
-            awg_value, awg_confidence = self.answers['wire_gauge']
-            if awg_value is not None and awg_confidence > 0.5:
-                # Skip max_current question since AWG determines current capacity
-                questions_to_skip.add('max_current')
-                
-                # Automatically set current based on AWG if not already set
-                if 'max_current' not in self.answers:
-                    inferred_current = self.get_current_from_awg(awg_value)
-                    if inferred_current:
-                        self.answers['max_current'] = (inferred_current, awg_confidence * 0.9)
-                        self.asked_questions.add('max_current')
-                        print(f"Automatically inferred {inferred_current}A current capacity from {awg_value}")
         if height_question_asked and 'height_requirement' in self.answers:
             _, confidence = self.answers['height_requirement']
             # Consider the answer uncertain if confidence is low or value is None
@@ -2874,268 +2673,7 @@ class LLMConnectorSelector:
             
         # Sort by order and return the first available question
         return min(available_questions, key=lambda x: x['order'])
-    def get_current_from_awg(self, awg_value):
-        if isinstance(awg_value, str):
-            import re
-            awg_match = re.search(r'(\d+)', str(awg_value))
-            if awg_match:
-                awg_num = int(awg_match.group(1))
-            else:
-                return None
-        elif isinstance(awg_value, (int, float)):
-            awg_num = int(awg_value)
-        else:
-            return None
-        awg_current_map = {
-            12: 20.0,14: 15.0, 16: 10.0, 18: 8.0, 20: 5.0, 22: 3.0, 24: 2.5, 26: 2.0, 
-            28: 1.5, 30: 1.0}
-        
-        return awg_current_map.get(awg_num, None)
-    def parse_space_constraints(self, response: str) -> Dict:
     
-        response_lower = response.lower().strip()
-        response_lower = response_lower.replace('millimeters', 'mm').replace('millimeter', 'mm')
-        response_lower = response_lower.replace('×', 'x').replace('X', 'x')  
-        # Check for uncertainty phrases first
-        uncertainty_phrases = [
-            "don't know", "dont know", "not sure", "uncertain", 
-            "no idea", "no specific", "not specified", "unsure",
-            "don't have", "no constraint", "no requirement", "any height",
-            "flexible", "whatever works", "any option", "no particular constraint",
-            "doesn't matter", "any size", "no limit"
-        ]
-        
-        if any(phrase in response_lower for phrase in uncertainty_phrases):
-            return {
-                "value": None,
-                "confidence": 0.0,
-                "reasoning": "User expressed uncertainty about spatial constraints"
-            }
-        
-        # Look for footprint minimization intent
-        footprint_indicators = [
-            "minimum footprint", "small footprint", "compact", "tight space", 
-            "limited space", "not much space", "space available", "small as possible",
-            "as small as", "minimize", "minimal", "tiny"
-        ]
-        is_space_constrained = any(indicator in response_lower for indicator in footprint_indicators)
-        
-        # Extract pin count information when present
-        pin_pattern = r'(\d+)\s*(?:pins?|contacts?)'
-        pin_match = re.search(pin_pattern, response_lower)
-        pin_count = int(pin_match.group(1)) if pin_match else None
-        
-        # Look for constraint phrases
-        constraint_phrases = ["fit within", "fit in", "maximum of", "not exceed", "at most", "up to", "less than", "under", "below"]
-        is_max_constraint = any(phrase in response_lower for phrase in constraint_phrases)
-        
-        # **ENHANCED 2D DIMENSION PATTERNS** - Handle all variations
-        two_d_patterns = [
-            r'(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)?',
-            r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)?',
-            r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)',
-            r'(\d+(?:\.\d+)?)\s*(?:by|BY)\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)?',
-            r'dimensions?\s*:?\s*(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)?',
-            r'size\s*:?\s*(\d+(?:\.\d+)?)\s*[x×*]\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)?']
-        
-        for pattern in two_d_patterns:
-            two_d_match = re.search(pattern, response_lower)
-            if two_d_match:
-                try:
-                    dim1, dim2 = map(float, two_d_match.groups())
-                    length = max(dim1, dim2)
-                    height = min(dim1, dim2)
-                    
-                    reasoning = f"Extracted dimensions: {dim1}x{dim2}mm (using {height}mm as height)"
-                    if is_space_constrained:
-                        reasoning += " with limited space constraint"
-                    if pin_count:
-                        reasoning += f" for {pin_count} pins"
-                    if is_max_constraint:
-                        reasoning += " as maximum allowed dimensions"
-                        
-                    return {
-                        "value": height,
-                        "confidence": 0.95 if is_space_constrained or is_max_constraint else 0.9,
-                        "reasoning": reasoning,
-                        "is_maximum": is_max_constraint or is_space_constrained,
-                        "all_dimensions": {"length": length, "height": height},
-                        "pin_count": pin_count
-                    }
-                except (ValueError, TypeError):
-                    continue  
-        
-        height_patterns = [
-            r'height\s*(?:of|is|:|-|=)?\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)',
-            r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)\s*(?:tall|height|high)',
-            r'height\s*(?:requirement|constraint|limit)?\s*(?:of|is|:|-|=)?\s*(\d+(?:\.\d+)?)',
-            r'maximum\s*(?:height|space|clearance)\s*(?:of|is|:|-|=)?\s*(\d+(?:\.\d+)?)',
-            r'(?:height|space|clearance)\s*(?:less than|under|below|not more than)\s*(\d+(?:\.\d+)?)',
-            r'up\s*to\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)\s*(?:height|tall|high|clearance)?',
-            r'(?:can\'t exceed|cannot exceed|not exceed|no more than)\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)',
-            r'(?:about|around|approximately|roughly|circa|~)\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)',
-            r'(?:between|from)\s*(\d+(?:\.\d+)?)\s*(?:and|to)\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)',
-            r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)(?:\s|$)',
-            r'^(\d+(?:\.\d+)?)$'
-        ]
-        
-        for pattern in height_patterns:
-            match = re.search(pattern, response_lower)
-            if match:
-                try:
-                    if 'between' in pattern or 'from' in pattern:
-                        if len(match.groups()) >= 2:
-                            min_val, max_val = map(float, match.groups()[:2])
-                            height = (min_val + max_val) / 2
-                            return {
-                                "value": height,
-                                "confidence": 0.8,
-                                "reasoning": f"Using midpoint {height}mm from range {min_val}-{max_val}mm",
-                                "range": [min_val, max_val]
-                            }
-                    else:
-                        height = float(match.group(1))
-                        
-                        if 'about' in pattern or 'around' in pattern or 'approximately' in pattern:
-                            confidence = 0.75
-                        elif 'maximum' in pattern or 'up to' in pattern:
-                            confidence = 0.85
-                        elif pattern.endswith('$'):  
-                            confidence = 0.7 
-                        else:
-                            confidence = 0.9
-                        # Validate reasonable range
-                        if 1.0 <= height <= 20.0:
-                            return {"value": height,
-                                "confidence": confidence,
-                                "reasoning": f"Extracted height: {height}mm"}
-                        else:
-                            return {"value": height,
-                                "confidence": 0.5,
-                                "reasoning": f"Extracted unusual height value: {height}mm (outside typical range)"}
-                except (ValueError, TypeError, IndexError):
-                    continue  
-        
-        if any(term in response_lower for term in ['small', 'compact', 'tiny', 'low profile']):
-            return {
-                "value": 4.0, 
-                "confidence": 0.6,
-                "reasoning": "Inferred small height requirement (4mm) from descriptive terms"
-            }
-        elif any(term in response_lower for term in ['large', 'big', 'spacious', 'tall']):
-            return {
-                "value": 10.0,  
-                "confidence": 0.6,
-                "reasoning": "Inferred larger height requirement (10mm) from descriptive terms"
-            }
-        elif any(term in response_lower for term in ['medium', 'standard', 'normal', 'typical']):
-            return {
-                "value": 6.0,
-                "confidence": 0.6,
-                "reasoning": "Inferred medium height requirement (6mm) from descriptive terms"
-            }
-        
-        number_pattern = r'(\d+(?:\.\d+)?)'
-        numbers = re.findall(number_pattern, response_lower)
-        if numbers:
-            # Take the first reasonable number as potential height
-            for num_str in numbers:
-                try:
-                    num = float(num_str)
-                    if 1.0 <= num <= 20.0:  # Reasonable height range
-                        return {
-                            "value": num,
-                            "confidence": 0.4,
-                            "reasoning": f"Extracted {num}mm as potential height constraint from numeric value in response"
-                        }
-                except ValueError:
-                    continue
-        
-        # No height information found
-        return {
-            "value": None,
-            "confidence": 0.0,
-            "reasoning": "No dimensional constraints found in response"
-        }
-
-
-    def _enhanced_fallback_parse(self, response: str, question: Dict) -> Dict:
-        
-        # For height_requirement, use the same logic as parse_space_constraints
-        if question['attribute'] == 'height_requirement':
-            return self.parse_space_constraints(response)
-        
-        # For other attributes, use existing fallback logic with enhancements
-        text_lower = response.lower()
-        
-        # Enhanced pitch parsing
-        if question['attribute'] == 'pitch_size':
-            pitch_patterns = [
-                r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)\s*pitch',
-                r'pitch\s*(?:size|of)?\s*(?:is|:)?\s*(\d+(?:\.\d+)?)',
-                r'(\d+(?:\.\d+)?)\s*mm\s*(?:pitch|spacing)',
-                r'pitch\s*(?:of)?\s*(\d+(?:\.\d+)?)',
-                r'(\d+(?:\.\d+)?)\s*(?:mm|millimeters?)(?:\s|$)',  # Just "1.27mm"
-                r'^(\d+(?:\.\d+)?)$'  # Just "1.27"
-            ]
-            
-            for pattern in pitch_patterns:
-                match = re.search(pattern, text_lower)
-                if match:
-                    try:
-                        pitch_size = float(match.group(1))
-                        if 0.5 <= pitch_size <= 2.5:
-                            return {"value": pitch_size, "confidence": 0.8, "reasoning": f"Extracted pitch size: {pitch_size}mm"}
-                        else:
-                            return {"value": pitch_size, "confidence": 0.5, "reasoning": f"Extracted unusual pitch size: {pitch_size}mm"}
-                    except (ValueError, IndexError):
-                        continue
-        
-        # Enhanced pin count parsing
-        if question['attribute'] == 'pin_count':
-            pin_patterns = [
-                r'(\d+)\s*(?:pins?|contacts?)',
-                r'(?:pins?|contacts?)\s*(?::|is|=)?\s*(\d+)',
-                r'^(\d+)$'  # Just the number
-            ]
-            
-            for pattern in pin_patterns:
-                match = re.search(pattern, text_lower)
-                if match:
-                    try:
-                        pin_count = int(match.group(1))
-                        if 2 <= pin_count <= 120:
-                            return {"value": pin_count, "confidence": 0.9, "reasoning": f"Extracted pin count: {pin_count}"}
-                        else:
-                            return {"value": pin_count, "confidence": 0.6, "reasoning": f"Extracted pin count outside typical range: {pin_count}"}
-                    except (ValueError, IndexError):
-                        continue
-        
-        # Use existing default values as last resort
-        default_values = {
-            'pitch_size': 2.0,  
-            'housing_material': 'plastic',  
-            'right_angle': True,  
-            'pin_count': 20,  
-            'max_current': 5.0,
-            'temp_range': 85.0,
-            'connection_type': 'PCB-to-PCB'
-        }
-        
-        if question['attribute'] in default_values:
-            return {
-                "value": default_values[question['attribute']],
-                "confidence": 0.3,
-                "reasoning": f"Used default value after parse failure: {default_values[question['attribute']]}"
-            }
-        
-        return {
-            "value": None,
-            "confidence": 0.0,
-            "reasoning": "Could not parse response even with enhanced fallback"
-        }
-
-
     def normalize_connection_type(self, value):
         if not isinstance(value, str):
             return value
