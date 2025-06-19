@@ -1330,7 +1330,49 @@ class LLMConnectorSelector:
         self.current_question = None
         self.question_history = []
         self.parse_failures = 0
+    def check_for_tie(self) -> Tuple[bool, List[str]]:
+        scores = list(self.confidence_scores.items())
+        max_score = max(scores, key=lambda x: x[1])[1]
+        tied = [conn for conn, score in scores if abs(score - max_score) <= 5.0]
+        return len(tied) > 1 and max_score > 60, tied
 
+    def generate_tie_question(self, tied_connectors: List[str]) -> str:
+        differences = []
+        for conn in tied_connectors:
+            specs = self.connectors[conn]
+            height = min(specs.get('height_options', [10])) if specs.get('height_options') else 10
+            pitch = specs.get('pitch_size', 'N/A')
+            differences.append(f"{conn}: {height}mm height, {pitch}mm pitch")
+        
+        prompt = f"""Both {' and '.join(tied_connectors)} connectors meet the user's requirements well.
+    Differences: {', '.join(differences)}
+    Generate a brief response that says both are good matches, mentions the key difference, and asks which the user prefers. Be conversational.
+    start your sentence with this: TIE BREAKER ALERT!! """
+
+        try:
+            from langchain.schema import SystemMessage, HumanMessage
+            response = self.llm.invoke([
+                SystemMessage(content="You are a helpful connector expert. Be brief and clear."),
+                HumanMessage(content=prompt)
+            ])
+            return response.content.strip()
+        except:
+            return f"Both {' and '.join(tied_connectors)} connectors meet your requirements. Which do you prefer?"
+
+    def select_from_user_preference(self, user_response: str, tied_connectors: List[str]) -> str:
+        prompt = f"""User was choosing between {tied_connectors} connectors. User said: "{user_response}"
+    Which connector should I recommend? Respond with just the connector name."""
+        
+        try:
+            from langchain.schema import SystemMessage, HumanMessage  
+            response = self.llm.invoke([
+                SystemMessage(content="Return only the connector name that best matches the user's preference."),
+                HumanMessage(content=prompt)
+            ])
+            winner = response.content.strip().upper()
+            return winner if winner in tied_connectors else tied_connectors[0]
+        except:
+            return tied_connectors[0]
     ## This got regex as backup on failure of LLM for response parsing and scoring too much backups 
     def _fallback_parse(self, text: str) -> dict:
         result = {}
@@ -1592,8 +1634,16 @@ class LLMConnectorSelector:
             if not hasattr(self, 'confidence_scores'):
                 self.confidence_scores = {connector: 0.0 for connector in self.connectors}
             ## LLM must recognize what ever it can
-            system_message = SystemMessage(content="""You are an expert in analyzing connector requirements.
-            Extract technical specifications from user messages, focusing on explicitly mentioned. Never assume technical specifications.""")
+            system_message = SystemMessage(content="""You are analyzing user input to extract ONLY explicitly mentioned connector requirements. 
+DO NOT infer, assume, or guess any requirements that are not clearly stated.
+
+CRITICAL RULES:
+- Only extract requirements that are explicitly mentioned by the user
+- If a requirement is not mentioned, DO NOT include it in the response
+- Do not make assumptions based on context
+- Use low confidence scores unless explicitly stated
+- Return empty JSON {{}} if no requirements are mentioned""")
+            
             
             user_message = HumanMessage(content=f"""
             Extract connector requirements from this message: "{message}"
@@ -1625,7 +1675,7 @@ class LLMConnectorSelector:
             - If right angle is mentioned with PCB, this often implies PCB-to-Cable connection
             - Be aggressive in inferring connection types from context
             
-            Return a JSON object with explicitly mentioned AND reasonably implied requirements:
+            Return a JSON object with explicitly mentioned requirements:
             - pitch_size (in mm)
             - pin_count (number of pins)
             - max_current (in Amps)
@@ -2153,6 +2203,22 @@ class LLMConnectorSelector:
     # Modified generate_recommendation function
     async def generate_recommendation(self, best_connector=None, max_confidence=None) -> Dict:
         try:
+        # Step 1: Check for ties (NEW)
+            is_tie, tied_connectors = self.check_for_tie()
+            
+            if is_tie:
+                print(f"Tie detected: {tied_connectors}")
+                
+                # Generate tie-breaking question
+                tie_question = self.generate_tie_question(tied_connectors)
+                
+                # Return special tie-breaking response (NEW)
+                return {
+                    'status': 'tie_question',
+                    'message': tie_question,
+                    'tied_connectors': tied_connectors,
+                    'confidence_scores': {k: float(v) for k, v in self.confidence_scores.items()}
+                }
             # Find the best connector and its confidence if not provided
             if best_connector is None or max_confidence is None:
                 scores = list(self.confidence_scores.items())
@@ -2188,233 +2254,176 @@ class LLMConnectorSelector:
                     max_pins = connector_specs.get('max_pins', 0)
                     
                     if pin_count > max_pins:
-                        unconfirmed_features.append(f"Pin count of {pin_count} exceeds standard maximum of {max_pins}")
-                    elif pin_count not in valid_pins and pin_count <= max_pins:
-                        unconfirmed_features.append(f"Pin count of {pin_count} is within range but may need configuration confirmation")
-                
-                elif attr == 'pitch_size':
-                    spec_pitch = connector_specs.get('pitch_size', 0)
-                    if abs(float(value) - spec_pitch) > 0.05:
-                        unconfirmed_features.append(f"Pitch size of {value}mm differs from standard {spec_pitch}mm")
-                
-                elif attr == 'max_current':
-                    spec_current = connector_specs.get('max_current', 0)
-                    if float(value) > spec_current:
-                        unconfirmed_features.append(f"Current requirement of {value}A exceeds standard rating of {spec_current}A")
-                
-                elif attr == 'temp_range':
-                    min_temp, max_temp = connector_specs.get('temp_range', (-273, 1000))
-                    if float(value) > max_temp:
-                        unconfirmed_features.append(f"Temperature requirement of {value}°C exceeds maximum rating of {max_temp}°C")
+                        unconfirmed_features.append(f"Pin count ({pin_count}) may exceed recommendations for optimal performance")
+                    elif pin_count not in valid_pins and valid_pins:
+                        closest_pin = min(valid_pins, key=lambda x: abs(x - pin_count)) if valid_pins else pin_count
+                        if abs(closest_pin - pin_count) > 5:
+                            unconfirmed_features.append(f"Requested pin count ({pin_count}) differs from standard options (closest: {closest_pin})")
                 
                 elif attr == 'housing_material':
-                    if value != connector_specs.get('housing_material', ''):
-                        unconfirmed_features.append(f"Housing material requirement ({value}) differs from standard ({connector_specs.get('housing_material', '')})")
-                
-                elif attr == 'emi_protection':
-                    if value and not connector_specs.get('emi_protection', False):
-                        unconfirmed_features.append(f"EMI protection is required but not standard with this connector")
-                
-                elif attr == 'mixed_power_signal':
-                    if value and not connector_specs.get('mixed_power_signal', False):
-                        unconfirmed_features.append(f"Mixed power/signal capability is required but may need special configuration")
-                
-                elif attr == 'right_angle':
-                    if value != connector_specs.get('right_angle', False):
-                        unconfirmed_features.append(f"Connector orientation (right angle: {value}) may require special configuration")
-                        
-                elif attr == 'height_requirement' and value is not None:
-                    height_range = connector_specs.get('height_range', (0, 0))
-                    height_options = connector_specs.get('height_options', [])
+                    required_material = value.lower() if isinstance(value, str) else value
+                    connector_material = connector_specs.get('housing_material', '').lower()
                     
-                    if not (height_range[0] <= float(value) <= height_range[1]):
-                        closest = min(height_options, key=lambda x: abs(x - float(value))) if height_options else None
-                        if closest:
-                            unconfirmed_features.append(f"Height requirement of {value}mm differs from available options (closest: {closest}mm)")
-            
-            ## create user requirements summary
-            requirements_summary = self.format_user_requirements_summary()
-            requirements_text = self.format_requirements()
-            scores_text = self.format_scores()
-            
-            # Only recommend contact for truly low confidence
-            if max_confidence < 22 or (len(unconfirmed_features) > 3 and max_confidence < 22):
+                    if required_material == 'metal' and 'plastic' in connector_material:
+                        unconfirmed_features.append(f"EMI protection is required but not standard with this connector")
+                    
+                    elif attr == 'mixed_power_signal':
+                        if value and not connector_specs.get('mixed_power_signal', False):
+                            unconfirmed_features.append(f"Mixed power/signal capability is required but may need special configuration")
+                    
+                    elif attr == 'right_angle':
+                        if value != connector_specs.get('right_angle', False):
+                            unconfirmed_features.append(f"Connector orientation (right angle: {value}) may require special configuration")
+                            
+                    elif attr == 'height_requirement' and value is not None:
+                        height_range = connector_specs.get('height_range', (0, 0))
+                        height_options = connector_specs.get('height_options', [])
+                        
+                        if not (height_range[0] <= float(value) <= height_range[1]):
+                            closest = min(height_options, key=lambda x: abs(x - float(value))) if height_options else None
+                            if closest:
+                                unconfirmed_features.append(f"Height requirement of {value}mm differs from available options (closest: {closest}mm)")
+                
+                ## create user requirements summary
+                requirements_summary = self.format_user_requirements_summary()
+                requirements_text = self.format_requirements()
+                scores_text = self.format_scores()
+                
+                # Only recommend contact for truly low confidence
+                if max_confidence < 22 or (len(unconfirmed_features) > 3 and max_confidence < 22):
+                    system_message = SystemMessage(content=self.system_prompt)
+                    lnk="https://www.nicomatic.com/contact/?"
+                    user_message = HumanMessage(content=f"""
+                    Based on the following user requirements:
+                    
+                    {requirements_summary}
+                    
+                    I cannot confidently recommend a specific connector.
+                    
+                    Please provide a response that explains:
+                    1. First, summarize the requirements provided by the user
+                    2. Explain that based on these requirements, we need more information to make a specific recommendation
+                    3. Suggest the user contact Nicomatic directly for personalized assistance
+                    4. Provide this contact link: "{lnk}"
+                    
+                    Start with: "Based on your requirements..."
+                    Include the summary of requirements in your response.
+                    Keep the response concise and professional.
+                    """)
+                    
+                    try:
+                        llm_response = self.llm.invoke([system_message, user_message])
+                        fallback_text = llm_response.content.strip()
+                    except Exception as llm_error:
+                        print(f"Error generating LLM fallback: {llm_error}")
+                        fallback_text = (
+                            f"Based on your requirements, I need additional information to provide the most accurate recommendation. "
+                            f"For personalized assistance with your "
+                            f"connector selection, please contact Nicomatic's support team directly at {lnk}"
+                        )
+                        
+                        # Return in the expected format
+                        return {
+                            "status": "complete",
+                            "recommendation": {
+                                "connector": "contact",
+                                "confidence": "insufficient",
+                                "analysis": fallback_text,
+                                "requirements": requirements_text,
+                                "requirements_summary": requirements_summary,
+                                "confidence_scores": formatted_scores}}
+                
+                # If we have a reasonable confidence, generate a recommendation with notes
                 system_message = SystemMessage(content=self.system_prompt)
-                lnk="https://www.nicomatic.com/contact/?"
-                user_message = HumanMessage(content=f"""
-                Based on the following user requirements:
+                if best_connector == "DMM":
+                    link= "https://configurator.nicomatic.com/product_configurator/part_builder?id=89"
+                elif best_connector == "EMM":
+                    link= "https://configurator.nicomatic.com/product_configurator/part_builder?id=169"
+                elif best_connector == "CMM":
+                    link= "https://configurator.nicomatic.com/product_configurator/part_builder?id=3" 
+                elif best_connector == "AMM":
+                    link= "https://configurator.nicomatic.com/product_configurator/part_builder?id=5"  
+                else:
+                    link="https://www.nicomatic.com/contact"
+                    
+                # Include notes about features needing confirmation
+                unconfirmed_notes = ""
+                if unconfirmed_features:
+                    unconfirmed_notes = "\n\nPlease include this note: " + "; ".join(unconfirmed_features) + ". Recommend confirming these details with Nicomatic for their specific application."
+                    
+                # Get connector technical specifications
+                temp_range = connector_specs.get('temp_range', (-273, 1000))
+                specs_to_include = {
+                    "Pitch Size": f"{connector_specs.get('pitch_size', 'N/A')} mm",
+                    "Maximum Current": f"{connector_specs.get('max_current', 'N/A')} A",
+                    "Temperature Range": f"{temp_range[0]} to {temp_range[1]}°C"
+                }
+                
+                # Format specs for inclusion
+                formatted_specs = "\n".join([f"- {name}: {value}" for name, value in specs_to_include.items()])
+                    
+                user_message = HumanMessage(content=f"""Based on the following requirements from the user:
                 
                 {requirements_summary}
                 
-                I cannot confidently recommend a specific connector.
+                Confidence Scores:
+                {scores_text}
                 
-                Please provide a response that explains:
-                1. First, summarize the requirements provided by the user
-                2. Explain that based on these requirements, we need more information to make a specific recommendation
-                3. Suggest the user contact Nicomatic directly for personalized assistance
-                4. Provide this contact link: "{lnk}"
+                Please recommend the {best_connector} connector as the closest match among Nicomatic's connectors.
                 
-                Start with: "Based on your requirements..."
-                Include the summary of requirements in your response.
-                Keep the response concise and professional.
+                Technical Specifications for {best_connector}:
+                {formatted_specs}
+                
+                Include the following in your response:
+                1. Brief confirmation that {best_connector} meets their main requirements
+                2. Key technical specifications above
+                3. Any important considerations for their specific application
+                4. This configuration link: {link}
+                
+                {unconfirmed_notes}
+                
+                Keep the response professional but conversational, and focus on how this connector solves their specific needs.
                 """)
                 
                 try:
-                    recommendation = await self.llm.agenerate([[system_message, user_message]])
-                    recommendation_text = recommendation.generations[0][0].text
+                    llm_response = self.llm.invoke([system_message, user_message])
                     
-                    # Return in the expected format
+                    response_content = llm_response.content.strip()
+                    
                     return {
                         "status": "complete",
                         "recommendation": {
-                            "connector": "contact",
-                            "confidence": "insufficient",
-                            "analysis": recommendation_text,
+                            "connector": best_connector,
+                            "confidence": f"{max_confidence:.1f}%",
+                            "analysis": response_content,
                             "requirements": requirements_text,
                             "requirements_summary": requirements_summary,
-                            "confidence_scores": formatted_scores
-                        }
-                    }
+                            "confidence_scores": formatted_scores,
+                            "unconfirmed_features": unconfirmed_features,
+                            "gap_to_second": max_confidence - max_other_score}}
+                
                 except Exception as e:
-                    print(f"Error generating contact recommendation: {str(e)}")
-                    fallback_text = (
-                        f"Based on your requirements ({requirements_summary}), I don't have enough information to confidently "
-                        f"recommend a specific connector. For personalized assistance with your "
-                        f"connector selection, please contact Nicomatic's support team directly at {lnk}"
-                    )
+                    print(f"Error generating recommendation: {str(e)}")
                     
-                    # Return in the expected format
+                    # Fallback response
+                    fallback_response = f"Based on your requirements, the {best_connector} connector is the best match with {max_confidence:.1f}% confidence. Please visit {link} to configure your connector."
+                    
                     return {
                         "status": "complete",
                         "recommendation": {
-                            "connector": "contact",
-                            "confidence": "insufficient",
-                            "analysis": fallback_text,
+                            "connector": best_connector,
+                            "confidence": f"{max_confidence:.1f}%",
+                            "analysis": fallback_response,
                             "requirements": requirements_text,
                             "requirements_summary": requirements_summary,
                             "confidence_scores": formatted_scores}}
             
-            # If we have a reasonable confidence, generate a recommendation with notes
-            system_message = SystemMessage(content=self.system_prompt)
-            if best_connector == "DMM":
-                link= "https://configurator.nicomatic.com/product_configurator/part_builder?id=89"
-            elif best_connector == "EMM":
-                link= "https://configurator.nicomatic.com/product_configurator/part_builder?id=169"
-            elif best_connector == "CMM":
-                link= "https://configurator.nicomatic.com/product_configurator/part_builder?id=3" 
-            elif best_connector == "AMM":
-                link= "https://configurator.nicomatic.com/product_configurator/part_builder?id=5"  
-            else:
-                link="https://www.nicomatic.com/contact"
-                
-            # Include notes about features needing confirmation
-            unconfirmed_notes = ""
-            if unconfirmed_features:
-                unconfirmed_notes = "\n\nPlease include this note: " + "; ".join(unconfirmed_features) + ". Recommend confirming these details with Nicomatic for their specific application."
-                
-            # Get connector technical specifications
-            temp_range = connector_specs.get('temp_range', (-273, 1000))
-            specs_to_include = {
-                "Pitch Size": f"{connector_specs.get('pitch_size', 'N/A')} mm",
-                "Maximum Current": f"{connector_specs.get('max_current', 'N/A')} A",
-                "Temperature Range": f"{temp_range[0]} to {temp_range[1]}°C"
-            }
-            
-            # Format specs for inclusion
-            formatted_specs = "\n".join([f"- {name}: {value}" for name, value in specs_to_include.items()])
-                
-            user_message = HumanMessage(content=f"""Based on the following requirements from the user:
-            
-            {requirements_summary}
-            
-            Confidence Scores:
-            {scores_text}
-            
-            Please recommend the {best_connector} connector as the closest match among Nicomatic's connectors.
-            {unconfirmed_notes}
-            
-            The {best_connector} connector has the following technical specifications that MUST be included in your response:
-            {formatted_specs}
-            
-            Start your response with a summary of the key requirements that led to this recommendation.
-            Then explain that based on these requirements, the {best_connector} is the most suitable connector from Nicomatic.
-            Be sure to include the technical specifications (pitch size, operational current, and temperature range) in your response.
-            
-            For building the part number for this connector, provide this link: "{link}"
-            
-            Format guidelines:
-                - Begin with "Based on your requirements..."
-                - Include a brief summary of the key inputs that led to this recommendation
-                - Include the technical specifications as listed above
-                - Do not mention features of other connectors
-                - Do not mention confidence scores
-                - Keep the response concise and avoid special characters or formatting
-            """)
-
-            try:
-                llm_response = await self.llm.agenerate([[system_message, user_message]])
-                recommendation_text = llm_response.generations[0][0].text
-                
-                # Return in the expected format
-                return {
-                    "status": "complete",
-                    "recommendation": {
-                        "connector": best_connector,
-                        "confidence": f"{max_confidence:.1f}%",
-                        "analysis": recommendation_text,
-                        "requirements": requirements_text,
-                        "requirements_summary": requirements_summary,
-                        "confidence_scores": formatted_scores }}
-            except Exception as e:
-                print(f"Error generating connector recommendation: {str(e)}")
-                # Fallback to static recommendation message if LLM fails
-                
-                # Format specs for fallback message
-                specs_info = f"It features a pitch size of {connector_specs.get('pitch_size', 'N/A')} mm, " \
-                            f"operational current of up to {connector_specs.get('max_current', 'N/A')} A, and " \
-                            f"temperature range of {temp_range[0]} to {temp_range[1]}°C."
-                    
-                # Include any unconfirmed features in fallback message
-                feature_notes = ""
-                if unconfirmed_features:
-                    feature_notes = "\n\nPlease note: " + "; ".join(unconfirmed_features) + ". Consider confirming these details with Nicomatic for your specific application."
-                    
-                fallback_message = (
-                    f"Based on your requirements:\n\n{requirements_summary}\n\n"
-                    f"I recommend the {best_connector} connector from Nicomatic's range. "
-                    f"This connector best matches your specifications for connection type, current requirements, and orientation. "
-                    f"{specs_info}"
-                    f"{feature_notes}\n\n"
-                    f"To configure your specific {best_connector} part, please use this link: {link}"
-                )
-                
-                # Return in the expected format
-                return {
-                    "status": "complete",
-                    "recommendation": {
-                        "connector": best_connector,
-                        "confidence": f"{max_confidence:.1f}%",
-                        "analysis": fallback_message,
-                        "requirements": requirements_text,
-                        "requirements_summary": requirements_summary,
-                        "confidence_scores": formatted_scores
-                    }
-                }
         except Exception as e:
-            print(f"Exception in generate_recommendation: {str(e)}")
-            # Return a properly structured error response
+            print(f"Error in generate_recommendation: {str(e)}")
             return {
-                "status": "complete",
-                "recommendation": {
-                    "connector": "CMM",  
-                    "confidence": "error",
-                    "analysis": "Based on your requirements for a plastic connector with 2mm pitch, I recommend the CMM connector from Nicomatic. CMM is designed for PCB-to-PCB connections with a 2mm pitch, featuring a plastic housing, and is ideal for on-board applications. It offers an operational current of up to 30A and a temperature range of -60 to 260°C.",
-                    "requirements": "Error processing detailed requirements",
-                    "requirements_summary": "Plastic connector with 2mm pitch",
-                    "confidence_scores": {"CMM": 100.0, "DMM": 50.0, "AMM": 0.0, "EMM": 0.0}
-                }
+                "status": "error",
+                "message": "I encountered an error generating recommendations. Please try again."
             }
-
     def format_requirements(self) -> str:
         critical_questions = {'mixed_power_signal', 'emi_protection', 'housing_material'}
         critical_reqs = []
@@ -3320,8 +3329,61 @@ class LLMConnectorSelector:
         # Ensure score is between min_score and 100
         return max(min_score, min(100.0, final_score))
     
-def pre_process_routing(user_input, formatted_chat_history):
-
+def pre_process_routing(user_input: str, formatted_chat_history: str) -> dict:
+    """Pre-process routing decisions before LLM analysis"""
+    
+    # Check if previous AI message was a tie-breaker
+    messages = formatted_chat_history.split('\n')
+    assistant_messages = [m for m in messages if m.startswith('AI:')]
+    
+    if assistant_messages:
+        last_assistant_message = assistant_messages[-1][4:].lower()  # Remove 'AI: ' prefix
+        
+        # Check if it was a tie-breaking message
+        tie_breaking_indicators = [
+            'both', 'either', 'difference is', 'preference based on', 
+            'which would you prefer', 'do you have a preference',
+            'main difference is size', 'sound like they\'ll work'
+        ]
+        
+        contains_connectors = any(conn in last_assistant_message for conn in ['cmm', 'emm', 'dmm', 'amm'])
+        contains_tie_breaking = any(indicator in last_assistant_message for indicator in tie_breaking_indicators)
+        
+        if contains_connectors and contains_tie_breaking:
+            # Previous message was a tie-breaker
+            # Check if user response is a CHOICE response (not just any mention)
+            
+            user_input_lower = user_input.lower().strip()
+            
+            # Check for WH-type questions
+            wh_words = ['what', 'where', 'why', 'who', 'how', 'which', 'when']
+            has_wh_question = any(word in user_input_lower for word in wh_words)
+            
+            # Check if ends with question mark
+            has_question_mark = user_input.strip().endswith('?')
+            
+            # Check if this is actually a CHOICE response to the tie-breaker
+            choice_indicators = [
+                'okay for', 'ok for', 'go with', 'choose', 'prefer', 'want',
+                'i\'ll take', 'let\'s use', 'sounds good', 'that works',
+                'the emm', 'the cmm', 'the dmm', 'the amm'
+            ]
+            
+            is_choice_response = any(indicator in user_input_lower for indicator in choice_indicators)
+            
+            # Only route to selection if it's NOT a question AND it's a choice response
+            if not has_wh_question and not has_question_mark and is_choice_response:
+                print("Direct routing enforcement: Tie-breaker choice response, routing to selection")
+                return {'score': 'selection'}
+            else:
+                print("Direct routing enforcement: Tie-breaker context but not a choice response, routing to general")
+                return {'score': 'general'}
+    
+    # Check for conversational filler that should go to general
+    simple_responses = ['ok', 'okay', 'thanks', 'thank you', 'got it', 'sounds good', 'hi', 'hello']
+    if user_input.lower().strip() in simple_responses:
+        print("Direct routing enforcement: Conversational filler, routing to general")
+        return {'score': 'general'}
     # Force routing to general for any input with a question mark
     if '?' in user_input:
         print("Direct routing enforcement: Input contains question mark, routing to general")
@@ -3723,7 +3785,7 @@ async def chat(request: Request):
                         yield response
                     
                     else:
-                        error_msg = f"Error: {result.get('message', 'Unknown error occurred')}"
+                        error_msg = result.get('message', 'I encountered an issue. Could you please try again?')
                         session_history.add_message(AIMessage(content=error_msg))
                         session_mapping[session_id]['connector_selector'] = None 
                         yield error_msg
