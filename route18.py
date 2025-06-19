@@ -1058,11 +1058,13 @@ def normalize_awg_value(awg_value):
 class LLMConnectorSelector:
     def __init__(self):
         ## Chatmodel
+        self.tie_breaker_active = False
+        self.tied_connectors = []
         self.llm = ChatOllama(
     model="gemma3:27b-16k-ctx", 
     temperature=0.1, 
     disable_streaming=True,    
-    num_ctx=15012, 
+    num_ctx=4012, 
     top_p=0.85, 
     top_k=12, 
     base_url=NICOMIND_BASE_URL,
@@ -1336,7 +1338,7 @@ class LLMConnectorSelector:
         tied = [conn for conn, score in scores if abs(score - max_score) <= 5.0]
         return len(tied) > 1 and max_score > 60, tied
 
-    def generate_tie_question(self, tied_connectors: List[str]) -> str:
+    async def generate_tie_question(self, tied_connectors: List[str]) -> str:  # ← Make it async
         differences = []
         for conn in tied_connectors:
             specs = self.connectors[conn]
@@ -1345,20 +1347,20 @@ class LLMConnectorSelector:
             differences.append(f"{conn}: {height}mm height, {pitch}mm pitch")
         
         prompt = f"""Both {' and '.join(tied_connectors)} connectors meet the user's requirements well.
-    Differences: {', '.join(differences)}
-    Generate a brief response that says both are good matches, mentions the key difference, and asks which the user prefers. Be conversational.
-    start your sentence with this: TIE BREAKER ALERT!! """
+        Differences: {', '.join(differences)}
+        Generate a brief response that says both are good matches, mentions the key difference, and asks which the user prefers. Be conversational.
+        start your sentence with this: TIE BREAKER ALERT!! """
 
         try:
             from langchain.schema import SystemMessage, HumanMessage
-            response = self.llm.invoke([
+            response = await self.llm.ainvoke([  # ← Use ainvoke with await
                 SystemMessage(content="You are a helpful connector expert. Be brief and clear."),
                 HumanMessage(content=prompt)
             ])
             return response.content.strip()
-        except:
-            return f"Both {' and '.join(tied_connectors)} connectors meet your requirements. Which do you prefer?"
-
+        except Exception as e:
+            print(f"Error in generate_tie_question: {e}")
+            return f"TIE BREAKER ALERT!! Both {' and '.join(tied_connectors)} connectors meet your requirements. Which do you prefer?"
     def select_from_user_preference(self, user_response: str, tied_connectors: List[str]) -> str:
         prompt = f"""User was choosing between {tied_connectors} connectors. User said: "{user_response}"
     Which connector should I recommend? Respond with just the connector name."""
@@ -1995,16 +1997,38 @@ CRITICAL RULES:
             return None
         
 
-    async def process_answer(self, response: str) -> Dict:
-        if not self.current_question:
-            return {"status": "error", "message": "No active question"}
-
+    async def process_answer(self, response: str) -> Dict:      
         try:
+            if self.tie_breaker_active:
+                print(f"Processing tie-breaker choice: {response}")
+                
+                # Use select_from_user_preference to determine winner
+                chosen_connector = self.select_from_user_preference(response, self.tied_connectors)
+                print(f"User chose: {chosen_connector}")
+                
+                # Boost the chosen connector's score significantly
+                if chosen_connector in self.confidence_scores:
+                    self.confidence_scores[chosen_connector] += 50.0
+                    print(f"Boosted {chosen_connector} score to {self.confidence_scores[chosen_connector]}")
+                
+                # Clear tie-breaker state
+                self.tie_breaker_active = False
+                self.tied_connectors = []
+                
+                # Generate final recommendation with chosen connector
+                # Force skip tie detection since we just resolved it
+                recommendation = await self.generate_recommendation(
+                    best_connector=chosen_connector, 
+                    max_confidence=self.confidence_scores[chosen_connector])
+                
+                return {
+                    'status': 'complete',
+                    'recommendation': recommendation,
+                    'confidence_scores': self.confidence_scores}
             # Check for intent to restart
             restart_patterns = [
                 r"\brestart\b", r"\bnew\s+selection\b", r"\bstart\s+over\b", r"\bbegin\s+again\b",
-                r"\breset\b", r"\bstart\s+new\b", r"\bdifferent\s+connector\b"
-            ]
+                r"\breset\b", r"\bstart\s+new\b", r"\bdifferent\s+connector\b"]
             
             if any(re.search(pattern, response.lower()) for pattern in restart_patterns):
                 self.answers = {}
@@ -2203,22 +2227,25 @@ CRITICAL RULES:
     # Modified generate_recommendation function
     async def generate_recommendation(self, best_connector=None, max_confidence=None) -> Dict:
         try:
-        # Step 1: Check for ties (NEW)
-            is_tie, tied_connectors = self.check_for_tie()
-            
-            if is_tie:
-                print(f"Tie detected: {tied_connectors}")
+            if not self.tie_breaker_active:
+                is_tie, tied_connectors = self.check_for_tie()
                 
-                # Generate tie-breaking question
-                tie_question = self.generate_tie_question(tied_connectors)
-                
-                # Return special tie-breaking response (NEW)
-                return {
-                    'status': 'tie_question',
-                    'message': tie_question,
-                    'tied_connectors': tied_connectors,
-                    'confidence_scores': {k: float(v) for k, v in self.confidence_scores.items()}
-                }
+                if is_tie:
+                    print(f"Tie detected: {tied_connectors}")
+                    
+                    # Set tie-breaker state BEFORE returning
+                    self.tie_breaker_active = True
+                    self.tied_connectors = tied_connectors
+                    
+                    # Generate tie-breaking question
+                    tie_question = await self.generate_tie_question(tied_connectors) 
+                    
+                    # Return special tie-breaking response
+                    return {
+                        'status': 'tie_question',
+                        'message': tie_question,
+                        'tied_connectors': tied_connectors,
+                        'confidence_scores': {k: float(v) for k, v in self.confidence_scores.items()}}
             # Find the best connector and its confidence if not provided
             if best_connector is None or max_confidence is None:
                 scores = list(self.confidence_scores.items())
@@ -3687,40 +3714,32 @@ async def chat(request: Request):
                                     print("Recommendation is ready from initial message")
                                     try:
                                         # Generate recommendation immediately
-                                        recommendation = await selector.generate_recommendation(
-                                            best_connector=initial_result.get('best_connector'),
-                                            max_confidence=initial_result.get('best_score', 100.0)
-                                        )
+                                        recommendation = await selector.generate_recommendation()
                                         
-                                        if recommendation and 'recommendation' in recommendation:
-                                            response = recommendation['recommendation']['analysis']
+                                        if recommendation['status'] == 'tie_question':
+                                            # CRITICAL: Display tie-breaking question but KEEP session alive
+                                            response = recommendation['message']
                                             session_history.add_message(AIMessage(content=response))
-                                            session_mapping[session_id]['connector_selector'] = None
+                                            # DO NOT reset connector_selector here!
                                             yield response
                                             return
-                                        else:
-                                            # Fallback response if recommendation structure is incorrect
-                                            fallback = "Based on your requirement for a 2mm pitch plastic connector, I recommend the CMM connector from Nicomatic's range."
-                                            session_history.add_message(AIMessage(content=fallback))
-                                            session_mapping[session_id]['connector_selector'] = None
-                                            yield fallback
+                                        elif recommendation['status'] == 'complete':
+                                            # Final recommendation - NOW we can reset
+                                            response = recommendation['recommendation']['analysis']
+                                            session_history.add_message(AIMessage(content=response))
+                                            session_mapping[session_id]['connector_selector'] = None  # Reset only here
+                                            yield response
                                             return
+                                            
                                     except Exception as rec_error:
-                                        print(f"Error generating recommendation: {rec_error}")
-                                        fallback = "Based on your requirement for a 2mm pitch plastic connector, I recommend the CMM connector from Nicomatic's range."
+                                        print(f"Error generating recommendation: {str(rec_error)}")
+                                        fallback = "I encountered an error generating the recommendation. Please try again."
                                         session_history.add_message(AIMessage(content=fallback))
                                         session_mapping[session_id]['connector_selector'] = None
                                         yield fallback
                                         return
-                                
-                                # Handle result already containing recommendation 
-                                if 'recommendation' in initial_result:
-                                    response = initial_result['recommendation']['analysis']
-                                    session_history.add_message(AIMessage(content=response))
-                                    session_mapping[session_id]['connector_selector'] = None
-                                    yield response
-                                    return
                             
+                            # Handle continuing with questions
                             next_question = initial_result.get('next_question')
                             if next_question:
                                 print("\nInitial requirements processed")
@@ -3742,17 +3761,22 @@ async def chat(request: Request):
                                 
                         except Exception as init_error:
                             print(f"Error in initial processing: {str(init_error)}")
-                            # Provide fallback response for 2mm pitch plastic connector
-                            fallback = "Based on your requirement for a 2mm pitch plastic connector, I recommend the CMM connector from Nicomatic's range."
+                            fallback = "I encountered an error processing your request. Please try again."
                             session_history.add_message(AIMessage(content=fallback))
                             session_mapping[session_id]['connector_selector'] = None
                             yield fallback
                             return
                     
-                    ## Process answer and get next question/recommendation
+                    # EXISTING SESSION - Process answer (this is where tie-breaker responses come)
                     selector = session_mapping[session_id]['connector_selector']
+                    print(f"Processing user input: '{user_input}'")
                     result = await selector.process_answer(user_input)
-                    
+
+                    # DEBUG: Print the actual result to see what's happening
+                    print(f"process_answer returned: {result}")
+                    print(f"Result status: {result.get('status', 'NO STATUS')}")
+                    print(f"Result keys: {list(result.keys()) if isinstance(result, dict) else 'NOT A DICT'}")
+
                     if result['status'] == 'continue':
                         next_question = result.get('next_question')
                         if next_question:
@@ -3765,38 +3789,67 @@ async def chat(request: Request):
                             session_history.add_message(AIMessage(content=response))
                             yield response
                         else:
-                            ## No more questions, generate recommendation
+                            # No more questions, generate recommendation
+                            print("No more questions, generating recommendation...")
                             recommendation = await selector.generate_recommendation()
-                            if recommendation['status'] == 'complete':
+                            print(f"Recommendation returned: {recommendation}")
+                            print(f"Recommendation status: {recommendation.get('status', 'NO STATUS')}")
+                            
+                            if recommendation['status'] == 'tie_question':
+                                # CRITICAL: Display tie-breaking question but KEEP session alive
+                                print(f"Displaying tie question: {recommendation['message']}")
+                                response = recommendation['message']
+                                session_history.add_message(AIMessage(content=response))
+                                # DO NOT reset connector_selector here!
+                                yield response
+                            elif recommendation['status'] == 'complete':
+                                # Final recommendation - reset session
                                 response = recommendation['recommendation']['analysis']
                                 session_history.add_message(AIMessage(content=response))
-                                session_mapping[session_id]['connector_selector'] = None
+                                session_mapping[session_id]['connector_selector'] = None  # Reset only here
                                 yield response
                             else:
+                                print(f"Unexpected recommendation status: {recommendation.get('status')}")
                                 response = "I couldn't generate a recommendation with the provided information. Could you provide more details?"
                                 session_history.add_message(AIMessage(content=response))
                                 yield response
-                    
+                                
                     elif result['status'] == 'complete':
-                        recommendation = result['recommendation']
-                        response = f"{recommendation['analysis']}"
+                        print("Result status is complete, handling final recommendation...")
+                        # Handle the nested structure correctly
+                        if 'recommendation' in result['recommendation']:
+                            response = result['recommendation']['recommendation']['analysis']
+                        else:
+                            response = result['recommendation']['analysis']
                         session_history.add_message(AIMessage(content=response))
                         session_mapping[session_id]['connector_selector'] = None
                         yield response
-                    
+                    elif result['status'] == 'tie_question':
+                        # NEW: Handle tie-breaking question from process_answer
+                        print(f"Tie question from process_answer: {result['message']}")
+                        response = result['message']
+                        session_history.add_message(AIMessage(content=response))
+                        # DO NOT reset connector_selector here!
+                        yield response
+                    elif result['status'] == 'error':
+                        # Handle error status specifically
+                        print(f"Result status is error: {result.get('message', 'Unknown error')}")
+                        response = result.get('message', 'I encountered an error. Could you please try again?')
+                        session_history.add_message(AIMessage(content=response))
+                        yield response
+                        
                     else:
-                        error_msg = result.get('message', 'I encountered an issue. Could you please try again?')
-                        session_history.add_message(AIMessage(content=error_msg))
-                        session_mapping[session_id]['connector_selector'] = None 
-                        yield error_msg
-
+                        # This is where the error message is coming from!
+                        print(f"UNHANDLED STATUS: {result.get('status')} - Full result: {result}")
+                        response = "I couldn't process your answer. Could you please clarify?"
+                        session_history.add_message(AIMessage(content=response))
+                        yield response
                 except Exception as e:
-                    error_message = f"An error occurred during connector selection: {str(e)}"
-                    logging.error(f"Error in connector selection: {str(e)}")
-                    session_history.add_message(AIMessage(content=error_message))
-                    session_mapping[session_id]['connector_selector'] = None 
-                    yield error_message
-
+                    print(f"Error in generate_connector_selection: {str(e)}")
+                    error_response = "I encountered an error. Please try again."
+                    session_history.add_message(AIMessage(content=error_response))
+                    session_mapping[session_id]['connector_selector'] = None
+                    yield error_response
             return StreamingResponse(generate_connector_selection(), media_type="text/plain")
         else:
             async def generate_response():
