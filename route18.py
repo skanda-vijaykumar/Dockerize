@@ -1058,10 +1058,20 @@ def normalize_awg_value(awg_value):
 class LLMConnectorSelector:
     def __init__(self):
         ## Chatmodel
-        self.llm = ChatOllama(model="gemma3:27b-16k-ctx", temperature=0.0, num_ctx=15012, cache=False, format="json",base_url=NICOMIND_BASE_URL,client_kwargs={"timeout": 700,
+        self.llm = ChatOllama(
+    model="gemma3:27b-16k-ctx", 
+    temperature=0.1, 
+    disable_streaming=True,    
+    num_ctx=15012, 
+    top_p=0.85, 
+    top_k=12, 
+    base_url=NICOMIND_BASE_URL,
+    cache=False,
+    client_kwargs={"timeout": 700,
     "headers": {  
             "Authorization": f"Bearer {NICOMIND_API_KEY}"
-        }})
+        }}) 
+
         ## Structure for the LLM response
         self.response_schemas = [ResponseSchema(name="value", description="The parsed value from user response"),ResponseSchema(name="confidence", description="Confidence score between 0 and 1"),
                                   ResponseSchema(name="reasoning", description="Explanation of the parsing logic")]
@@ -1069,7 +1079,8 @@ class LLMConnectorSelector:
         ## System prompt for parsing
         self.system_prompt = """You are an expert in electronic connectors, specifically the AMM, CMM, DMM, and EMM connector families.
         Your role is to parse user responses to questions about connector requirements and extract meaningful information.
-        You should handle uncertainty in responses and provide confidence scores.
+        You should handle uncertainty in responses and provide confidence scores. You should never assume technical specifications. 
+        Give out your response only for those which is mentioned by the users.
         
         Key points:
         - Provide clear numerical or boolean values when possible
@@ -1246,7 +1257,7 @@ class LLMConnectorSelector:
             },
         
             {
-                'text': 'What are your height or space constraints (in mm)?',
+                'text': 'What are your height constraints for this connector (in mm)?',
                 'weight': 10, 
                 'attribute': 'height_requirement',
                 'clarification': 'Available heights/widths: AMM (4.0mm), EMM (4.6mm), CMM (5.5mm/7.7mm), DMM (5.0mm/7.0mm)',
@@ -1582,11 +1593,12 @@ class LLMConnectorSelector:
                 self.confidence_scores = {connector: 0.0 for connector in self.connectors}
             ## LLM must recognize what ever it can
             system_message = SystemMessage(content="""You are an expert in analyzing connector requirements.
-            Extract technical specifications from user messages, focusing on explicitly mentioned and implied values.""")
+            Extract technical specifications from user messages, focusing on explicitly mentioned. Never assume technical specifications.""")
             
             user_message = HumanMessage(content=f"""
             Extract connector requirements from this message: "{message}"
             
+
             IMPORTANT GUIDANCE:
             CONNECTION TYPE DETECTION - HIGHEST PRIORITY:
             - Terms like "board to board", "board-to-board", "PCB to PCB", "board-board" always indicate PCB-PCB connection
