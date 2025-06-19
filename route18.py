@@ -1058,19 +1058,10 @@ def normalize_awg_value(awg_value):
 class LLMConnectorSelector:
     def __init__(self):
         ## Chatmodel
-        self.llm = ChatOllama(
-    model="gemma3:27b-16k-ctx", 
-    temperature=0.1, 
-    disable_streaming=True,    
-    num_ctx=15012, 
-    top_p=0.85, 
-    top_k=12, 
-    base_url=NICOMIND_BASE_URL,
-    cache=False,
-    client_kwargs={"timeout": 700,
+        self.llm = ChatOllama(model="gemma3:27b-16k-ctx", temperature=0.0, num_ctx=15012, cache=False, format="json",base_url=NICOMIND_BASE_URL,client_kwargs={"timeout": 700,
     "headers": {  
             "Authorization": f"Bearer {NICOMIND_API_KEY}"
-        }}) 
+        }})
         ## Structure for the LLM response
         self.response_schemas = [ResponseSchema(name="value", description="The parsed value from user response"),ResponseSchema(name="confidence", description="Confidence score between 0 and 1"),
                                   ResponseSchema(name="reasoning", description="Explanation of the parsing logic")]
@@ -1258,12 +1249,12 @@ class LLMConnectorSelector:
                 'text': 'What are your height or space constraints (in mm)?',
                 'weight': 10, 
                 'attribute': 'height_requirement',
-                'clarification': 'Available heights/widths: AMM (4.0mm), EMM (4.6mm), CMM (3.5mm, 4mm, 5.5mm, 6mm, 7.7mm, 8mm), DMM (5.0mm, 6.2mm, 7.0mm, 8.2mm, 9.0mm, 9.2mm, 9.65mm, 10.1mm, 10.2mm, 10.5mm, 10.55mm, 11.0mm, 11.45mm, 11.5mm, 11.9mm, 12.0mm, 12.2mm, 12.35mm, 12.5mm, 12.8mm, 13.0mm, 13.25mm, 13.5mm, 13.7mm, 14.0mm, 14.15mm, 14.5mm, 14.6mm, 15.0mm, 15.05mm, 15.5mm, 16.0mm, 16.5 mm, 17.0mm,17.5mm)',
+                'clarification': 'Available heights/widths: AMM (4.0mm), EMM (4.6mm), CMM (5.5mm/7.7mm), DMM (5.0mm/7.0mm)',
                 'parse_prompt': """Extract the height/width requirement from the user's response. 
                 Look for:
                 - Exact measurements (e.g., "5mm", "4.6 millimeters")
                 - Range specifications (e.g., "under 5mm", "maximum 6mm")
-                - Dimensional constraints (e.g., "10x4", "50x5mm", "space of 5mm")
+                - Dimensional constraints (e.g., "50x5mm", "space of 5mm")
                 Return the height value in millimeters.""",
                 'order': 6
             },
@@ -1935,7 +1926,7 @@ class LLMConnectorSelector:
                     "clarification": self.current_question['clarification'],
                     "attribute": self.current_question['attribute']}
             
-            ## No more questions - all have been answered
+            # No more questions - all have been answered
             return None  
         except Exception as e:
             print(f"Error in get_next_question: {str(e)}")
@@ -2006,18 +1997,20 @@ class LLMConnectorSelector:
                             "confidence_scores": {k: f"{v:.1f}%" for k, v in self.confidence_scores.items()},
                             "skipped_height": True}
             
-            ## Normal processing with error handling
+            # Normal processing with error handling
             try:
                 parsed_response = await self.parse_response_with_llm(response, self.current_question)
             except Exception as e:
                 print(f"Error parsing response: {str(e)}")
-                ## Use fallback parsing on error
+                # Use fallback parsing on error
                 parsed_response = self._aggressive_fallback_parse(response, self.current_question)
             
             if parsed_response and 'value' in parsed_response:
                 # Store the answer with confidence
                 self.answers[self.current_question['attribute']] = (parsed_response['value'], parsed_response['confidence'])
                 self.asked_questions.add(self.current_question['attribute'])
+                
+                # Add to question history
                 self.question_history.append({'question': self.current_question['attribute'],
                     'answer': parsed_response['value'],
                     'confidence': parsed_response['confidence']})
@@ -2063,15 +2056,21 @@ class LLMConnectorSelector:
                 except Exception as q_error:
                     print(f"Error selecting next question: {str(q_error)}")
                     # Simple fallback to first unasked question
-                    self.current_question = next((q for q in self.all_questions if q['attribute'] not in self.asked_questions), None)
+                    self.current_question = next(
+                        (q for q in self.all_questions if q['attribute'] not in self.asked_questions), 
+                        None
+                    )
                 
                 if self.current_question:
-                    return {"status": "continue",
+                    return {
+                        "status": "continue",
                         "next_question": {
                             "question": self.current_question['text'],
                             "clarification": self.current_question['clarification'],
-                            "attribute": self.current_question['attribute']},
-                        "confidence_scores": {k: f"{v:.1f}%" for k, v in self.confidence_scores.items()}}
+                            "attribute": self.current_question['attribute']
+                        },
+                        "confidence_scores": {k: f"{v:.1f}%" for k, v in self.confidence_scores.items()}
+                    }
                 else:
                     try:
                         return await self.generate_recommendation()
@@ -2092,9 +2091,11 @@ class LLMConnectorSelector:
             return {"status": "error","message": f"An error occurred processing your response: {str(e)}"}
         
 
+    # New function to create a clean, human-readable summary of requirements
     def format_user_requirements_summary(self) -> str:
         summary_parts = []
         
+        # Map attribute names to more user-friendly display names
         attr_display_names = {
             'pitch_size': 'Pitch Size',
             'pin_count': 'Pin Count',
@@ -2137,25 +2138,34 @@ class LLMConnectorSelector:
             
         return "\n".join(summary_parts)
 
+    # Modified generate_recommendation function
     async def generate_recommendation(self, best_connector=None, max_confidence=None) -> Dict:
         try:
+            # Find the best connector and its confidence if not provided
             if best_connector is None or max_confidence is None:
                 scores = list(self.confidence_scores.items())
                 best_connector, max_confidence = max(scores, key=lambda x: x[1])
             
+            # Ensure confidence scores are numeric values, not strings
             formatted_scores = {}
             for k, v in self.confidence_scores.items():
                 formatted_scores[k] = float(v)
             
+            # Check if there are multiple connectors with the same best score
             scores = list(self.confidence_scores.items())
             top_connectors = [c for c, s in scores if abs(s - max_confidence) < 0.1] 
+            
+            # Get the second best score to calculate the gap
             other_scores = [score for connector, score in scores if connector != best_connector]
             max_other_score = max(other_scores) if other_scores else 0
             
+            # Collection for features needing confirmation
             unconfirmed_features = []
             
+            # Track attribute matches/mismatches for best connector
             connector_specs = self.connectors[best_connector]
             
+            # Review all answered attributes for potential issues
             for attr, (value, confidence) in self.answers.items():
                 if value is None:
                     continue
@@ -2234,7 +2244,8 @@ class LLMConnectorSelector:
                 
                 Start with: "Based on your requirements..."
                 Include the summary of requirements in your response.
-                Keep the response concise and professional.""")
+                Keep the response concise and professional.
+                """)
                 
                 try:
                     recommendation = await self.llm.agenerate([[system_message, user_message]])
@@ -2257,7 +2268,8 @@ class LLMConnectorSelector:
                     fallback_text = (
                         f"Based on your requirements ({requirements_summary}), I don't have enough information to confidently "
                         f"recommend a specific connector. For personalized assistance with your "
-                        f"connector selection, please contact Nicomatic's support team directly at {lnk}")
+                        f"connector selection, please contact Nicomatic's support team directly at {lnk}"
+                    )
                     
                     # Return in the expected format
                     return {
@@ -2293,7 +2305,8 @@ class LLMConnectorSelector:
             specs_to_include = {
                 "Pitch Size": f"{connector_specs.get('pitch_size', 'N/A')} mm",
                 "Maximum Current": f"{connector_specs.get('max_current', 'N/A')} A",
-                "Temperature Range": f"{temp_range[0]} to {temp_range[1]}°C"}
+                "Temperature Range": f"{temp_range[0]} to {temp_range[1]}°C"
+            }
             
             # Format specs for inclusion
             formatted_specs = "\n".join([f"- {name}: {value}" for name, value in specs_to_include.items()])
@@ -2323,7 +2336,8 @@ class LLMConnectorSelector:
                 - Include the technical specifications as listed above
                 - Do not mention features of other connectors
                 - Do not mention confidence scores
-                - Keep the response concise and avoid special characters or formatting """)
+                - Keep the response concise and avoid special characters or formatting
+            """)
 
             try:
                 llm_response = await self.llm.agenerate([[system_message, user_message]])
@@ -2359,7 +2373,8 @@ class LLMConnectorSelector:
                     f"This connector best matches your specifications for connection type, current requirements, and orientation. "
                     f"{specs_info}"
                     f"{feature_notes}\n\n"
-                    f"To configure your specific {best_connector} part, please use this link: {link}")
+                    f"To configure your specific {best_connector} part, please use this link: {link}"
+                )
                 
                 # Return in the expected format
                 return {
@@ -2370,7 +2385,9 @@ class LLMConnectorSelector:
                         "analysis": fallback_message,
                         "requirements": requirements_text,
                         "requirements_summary": requirements_summary,
-                        "confidence_scores": formatted_scores}}
+                        "confidence_scores": formatted_scores
+                    }
+                }
         except Exception as e:
             print(f"Exception in generate_recommendation: {str(e)}")
             # Return a properly structured error response
@@ -2382,7 +2399,9 @@ class LLMConnectorSelector:
                     "analysis": "Based on your requirements for a plastic connector with 2mm pitch, I recommend the CMM connector from Nicomatic. CMM is designed for PCB-to-PCB connections with a 2mm pitch, featuring a plastic housing, and is ideal for on-board applications. It offers an operational current of up to 30A and a temperature range of -60 to 260°C.",
                     "requirements": "Error processing detailed requirements",
                     "requirements_summary": "Plastic connector with 2mm pitch",
-                    "confidence_scores": {"CMM": 100.0, "DMM": 50.0, "AMM": 0.0, "EMM": 0.0}}}
+                    "confidence_scores": {"CMM": 100.0, "DMM": 50.0, "AMM": 0.0, "EMM": 0.0}
+                }
+            }
 
     def format_requirements(self) -> str:
         critical_questions = {'mixed_power_signal', 'emi_protection', 'housing_material'}
@@ -2396,7 +2415,9 @@ class LLMConnectorSelector:
                     critical_reqs.append(requirement)
                 else:
                     other_reqs.append(requirement)
+
         return "Critical Requirements:\n" + "\n".join(critical_reqs) + "\n\nOther Requirements:\n" + "\n".join(other_reqs)
+  
   
     ## For CLI purposes
     def format_scores(self) -> str:
@@ -2405,7 +2426,9 @@ class LLMConnectorSelector:
             for connector, score in sorted(
                 self.confidence_scores.items(),
                 key=lambda x: x[1],
-                reverse=True)])
+                reverse=True
+            )
+        ])
     def clean_numeric_value(self, value: str) -> float:
         try:
             cleaned = ''.join(c for c in value.replace(',', '.') if c.isdigit() or c == '.')
@@ -2423,7 +2446,8 @@ class LLMConnectorSelector:
                     return {
                         "value": pitch,
                         "confidence": 0.8,
-                        "reasoning": f"Matched standard pitch size {pitch}mm in response"}
+                        "reasoning": f"Matched standard pitch size {pitch}mm in response"
+                    }
         
         elif question['attribute'] == 'pin_count':
             # Extract numeric values
@@ -2431,7 +2455,7 @@ class LLMConnectorSelector:
             if numbers:
                 try:
                     pin_count = int(numbers[0])
-                    if 1 <= pin_count <= 200:
+                    if 1 <= pin_count <= 200:  # Reasonable range
                         return {
                             "value": pin_count,
                             "confidence": 0.7,
@@ -2446,17 +2470,20 @@ class LLMConnectorSelector:
                 return {
                     "value": "metal",
                     "confidence": 0.8,
-                    "reasoning": "User mentioned metal housing"}
+                    "reasoning": "User mentioned metal housing"
+                }
             elif 'plastic' in response.lower():
                 return {
                     "value": "plastic",
                     "confidence": 0.8,
-                    "reasoning": "User mentioned plastic housing"}
+                    "reasoning": "User mentioned plastic housing"
+                }
             elif 'emi' in response.lower() or 'shield' in response.lower():
                 return {
                     "value": "metal",
                     "confidence": 0.7,
-                    "reasoning": "User mentioned EMI or shielding, which implies metal housing"}
+                    "reasoning": "User mentioned EMI or shielding, which implies metal housing"
+                }
         
         # For yes/no questions
         if question['text'].endswith('?'):
@@ -2464,12 +2491,14 @@ class LLMConnectorSelector:
                 return {
                     "value": True,
                     "confidence": 0.7,
-                    "reasoning": "User responded affirmatively"}
+                    "reasoning": "User responded affirmatively"
+                }
             elif any(word in response.lower() for word in ['no', 'nope', 'not', 'don\'t', 'dont']):
                 return {
                     "value": False,
                     "confidence": 0.7,
-                    "reasoning": "User responded negatively" }
+                    "reasoning": "User responded negatively"
+                }
         
         # General fallback for any response
         if response.lower() in ["i dont know", "i don't know", "unknown", "unclear", "not sure"]:
@@ -2540,27 +2569,35 @@ class LLMConnectorSelector:
                 except (ValueError, IndexError):
                     pass
         
-        default_values = {'pitch_size': 2.0,  
+        default_values = {
+            'pitch_size': 2.0,  
             'housing_material': 'plastic',  
             'right_angle': True,  
             'pin_count': 20,  
             'max_current': 5.0,
             'temp_range': 85.0,
-            'connection_type': 'PCB-to-PCB'}
+            'connection_type': 'PCB-to-PCB'  
+        }
         
         if question['attribute'] in default_values:
-            return {"value": default_values[question['attribute']],
+            return {
+                "value": default_values[question['attribute']],
                 "confidence": 0.3,
-                "reasoning": f"Used default value after multiple parse failures"}
+                "reasoning": f"Used default value after multiple parse failures"
+            }
         
         # Last resort
-        return {"value": None,
+        return {
+            "value": None,
             "confidence": 0.0,
-            "reasoning": "Could not determine a value even with aggressive fallback"}
+            "reasoning": "Could not determine a value even with aggressive fallback"
+        }
     ## Understand user message with this and them grade confidence score
     async def parse_response_with_llm(self, response: str, question: Dict) -> Dict:
         try:
-           
+            # Special handling for height_requirement
+            if question['attribute'] == 'height_requirement':
+                return self.parse_space_constraints(response)
             # Handle other question types with the LLM
             system_message = SystemMessage(content=self.system_prompt)
             
@@ -2573,9 +2610,11 @@ class LLMConnectorSelector:
             - Parsing instructions: {question['parse_prompt']}
             
             Provide your response in the following JSON format only:
-            {{ "value": "parsed value (can be any data type)",
+            {{
+                "value": "parsed value (can be any data type)",
                 "confidence": "number between 0 and 1",
-                "reasoning": "your explanation"}}"""
+                "reasoning": "your explanation"
+            }}"""
             
             user_message = HumanMessage(content=user_prompt)
             messages = [system_message, user_message]
@@ -2673,7 +2712,149 @@ class LLMConnectorSelector:
             
         # Sort by order and return the first available question
         return min(available_questions, key=lambda x: x['order'])
-    
+    def parse_space_constraints(self, response: str) -> Dict:
+        response_lower = response.lower().replace('millimeters', 'mm').replace('millimeter', 'mm')
+        
+        # Check for uncertainty phrases first
+        uncertainty_phrases = [
+            "don't know", "dont know", "not sure", "uncertain", 
+            "no idea", "no specific", "not specified", "unsure",
+            "don't have", "no constraint", "no requirement", "any height",
+            "flexible", "whatever works", "any option", "no particular constraint"
+        ]
+        
+        if any(phrase in response_lower for phrase in uncertainty_phrases):
+            return {
+                "value": None,
+                "confidence": 0.0,
+                "reasoning": "User expressed uncertainty about spatial constraints"
+            }
+        
+        # Look for footprint minimization intent
+        footprint_indicators = [
+            "minimum footprint", "small footprint", "compact", "tight space", 
+            "limited space", "not much space", "space available", "small as possible"
+        ]
+        is_space_constrained = any(indicator in response_lower for indicator in footprint_indicators)
+        
+        # Extract pin count information when present
+        pin_pattern = r'(\d+)\s*(?:pins?|contacts?)'
+        pin_match = re.search(pin_pattern, response_lower)
+        pin_count = int(pin_match.group(1)) if pin_match else None
+        
+        # Look for "fit within" or similar constraint phrases
+        constraint_phrases = ["fit within", "fit in", "maximum of", "not exceed", "at most", "up to"]
+        is_max_constraint = any(phrase in response_lower for phrase in constraint_phrases)
+        
+        # Check for 2D dimensions (most common format)
+        two_d_pattern = r'(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeter)?'
+        two_d_match = re.search(two_d_pattern, response_lower)
+        if two_d_match:
+            dim1, dim2 = map(float, two_d_match.groups())
+            # In PCB context, height is typically the smaller dimension
+            length = max(dim1, dim2)
+            height = min(dim1, dim2)
+            
+            # Build detailed reasoning
+            reasoning = f"Extracted dimensions: {dim1}x{dim2}mm (using {height}mm as height)"
+            if is_space_constrained:
+                reasoning += " with limited space constraint"
+            if pin_count:
+                reasoning += f" for {pin_count} pins"
+            if is_max_constraint:
+                reasoning += " as maximum allowed dimensions"
+                
+            return {
+                "value": height,
+                "confidence": 0.95 if is_space_constrained or is_max_constraint else 0.9,
+                "reasoning": reasoning,
+                "is_maximum": is_max_constraint or is_space_constrained,
+                "all_dimensions": {"length": length, "height": height},
+                "pin_count": pin_count
+            }
+        
+        # 3. Enhanced height-specific patterns (comprehensive)
+        height_patterns = [
+            # Direct height specification
+            r'height\s*(?:of|is|:)?\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeter)',
+            r'(\d+(?:\.\d+)?)\s*(?:mm|millimeter)\s*(?:tall|height|high)',
+            r'height\s*(?:requirement|constraint|limit)?\s*(?:of|is|:)?\s*(\d+(?:\.\d+)?)',
+            
+            # Constraint-based specification
+            r'maximum\s*(?:height|space|clearance)\s*(?:of|is|:)?\s*(\d+(?:\.\d+)?)',
+            r'(?:height|space|clearance)\s*(?:less than|under|below|not more than)\s*(\d+(?:\.\d+)?)',
+            r'up\s*to\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeter)\s*(?:height|tall|high|clearance)',
+            r'(?:can\'t exceed|cannot exceed|not exceed|no more than)\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeter)',
+            
+            # Approximate specification
+            r'(?:about|around|approximately|roughly|circa|~)\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeter)',
+            
+            # Range specification
+            r'(?:between|from)\s*(\d+(?:\.\d+)?)\s*(?:and|to)\s*(\d+(?:\.\d+)?)\s*(?:mm|millimeter)',
+            
+            # Simple numeric with mm unit
+            r'(\d+(?:\.\d+)?)\s*(?:mm|millimeter)'
+        ]
+        
+        for pattern in height_patterns:
+            match = re.search(pattern, response_lower)
+            if match:
+                # Handle range patterns specially
+                if 'between' in pattern or 'from' in pattern:
+                    min_val, max_val = map(float, match.groups())
+                    # Use average of range
+                    height = (min_val + max_val) / 2
+                    return {
+                        "value": height,
+                        "confidence": 0.8,
+                        "reasoning": f"Using midpoint {height}mm from range {min_val}-{max_val}mm",
+                        "range": [min_val, max_val]
+                    }
+                else:
+                    height = float(match.group(1))
+                    
+                    # Assign confidence based on specificity
+                    if 'about' in pattern or 'around' in pattern or 'approximately' in pattern:
+                        confidence = 0.75
+                    elif 'maximum' in pattern or 'up to' in pattern:
+                        confidence = 0.85
+                    else:
+                        confidence = 0.9
+                    
+                    # Validate reasonable range
+                    if 1.0 <= height <= 20.0:
+                        return {
+                            "value": height,
+                            "confidence": confidence,
+                            "reasoning": f"Extracted height: {height}mm"
+                        }
+                    else:
+                        return {
+                            "value": height,
+                            "confidence": 0.5,
+                            "reasoning": f"Extracted unusual height value: {height}mm"
+                        }
+        
+        # 4. Advanced context inference
+        if 'small' in response_lower or 'compact' in response_lower or 'tiny' in response_lower:
+            return {
+                "value": 4.0, 
+                "confidence": 0.6,
+                "reasoning": "Inferred small height requirement from descriptive terms"
+            }
+        elif 'large' in response_lower or 'big' in response_lower or 'spacious' in response_lower:
+            return {
+                "value": 10.0,  
+                "confidence": 0.6,
+                "reasoning": "Inferred larger height requirement from descriptive terms"
+            }
+        
+        # No height information found
+        return {
+            "value": None,
+            "confidence": 0.0,
+            "reasoning": "Could not extract any height or space constraint information"
+        }
     def normalize_connection_type(self, value):
         if not isinstance(value, str):
             return value
@@ -2765,13 +2946,13 @@ class LLMConnectorSelector:
             
             # Connection Types handling
             elif attr == 'connection_types':
-                ## All connector families support PCB to Cable connections
-                ## This should not decrease scores
+                # All connector families support PCB to Cable connections
+                # This should not decrease scores
                 if value in ["PCB-to-Cable", "Cable-to-PCB", "pcb to cable", "cable to pcb"]:
                     attr_score = 1.0
                     matched_attrs.append(attr)
                 else:
-                    ## For other connection types, default to good compatibility
+                    # For other connection types, default to good compatibility
                     attr_score = 0.8
                     matched_attrs.append(attr)
             elif attr == 'right_angle':
@@ -2781,14 +2962,13 @@ class LLMConnectorSelector:
                 if user_wants_right_angle:
                     # User wants right angle
                     if connector_supports_right_angle:
-                        # Perfect match
-                        attr_score = 1.0  
+                        attr_score = 1.0  # Perfect match
                         matched_attrs.append(attr)
                     else:
-                        attr_score = 0.3  
-                        # Significant penalty but not critical
+                        attr_score = 0.3  # Significant penalty but not critical
                         unmatched_attrs.append(attr)
                 else:
+                    # User wants straight configuration - all connectors support this
                     attr_score = 1.0  # All connectors can be straight
                     matched_attrs.append(attr)
                     print(f"Straight configuration requested - {connector_specs.get('type', 'unknown')} supports this")
@@ -2799,6 +2979,7 @@ class LLMConnectorSelector:
                     # Normalize required AWG to numeric value
                     required_awg = self.normalize_awg_value(value) if callable(getattr(self, 'normalize_awg_value', None)) else normalize_awg_value(value)
                     if required_awg is None:
+                        # Skip if we can't determine the AWG value
                         continue
                         
                     # Get supported AWG values from connector specs
@@ -2818,7 +2999,8 @@ class LLMConnectorSelector:
                     else:
                         # Not in supported list - Apply penalty
                         attr_score = 0.0 
-                        unmatched_attrs.append(attr)    
+                        unmatched_attrs.append(attr)
+                        
                         # Mark as critical mismatch with high importance
                         critical_mismatch = True
                         critical_mismatch_factors.append(f"AWG {required_awg} is not in supported list {supported_awgs_raw}")
@@ -2830,10 +3012,12 @@ class LLMConnectorSelector:
                 height_range = connector_specs.get('height_range', (0, 0))
                 height_options = connector_specs.get('height_options', [])
                 
+                # Handle case where user's response included a range
                 user_height_range = answers.get("height_requirement_range", None)
                 
                 if user_height_range:
                     min_user, max_user = user_height_range
+                    # If connector height is within user's acceptable range
                     if any(min_user <= opt <= max_user for opt in height_options):
                         attr_score = 1.0
                         matched_attrs.append(attr)
@@ -2845,11 +3029,11 @@ class LLMConnectorSelector:
                                         abs(closest_to_range - max_user))
                         
                         if height_diff <= 1.5:
-                            attr_score = 0.9 
+                            attr_score = 0.9  # Less penalty for small differences
                             matched_attrs.append(attr)
                         else:
                             # More gradual decrease in score
-                            attr_score = max(0.5, 1.0 - (height_diff / 10.0)) 
+                            attr_score = max(0.5, 1.0 - (height_diff / 10.0))  # Changed from 5.0 to 10.0
                             if attr_score >= 0.7:
                                 matched_attrs.append(attr)
                             else:
@@ -2937,7 +3121,7 @@ class LLMConnectorSelector:
                 
                 # Compare normalized values
                 if required_material_normalized == connector_material_normalized:
-                    attr_score = 1.2 
+                    attr_score = 1.2  # Bonus for matching housing material
                     matched_attrs.append(attr)
                     # Additional bonus for matching metal housing
                     if required_material_normalized == 'metal' and connector_material_normalized == 'metal':
@@ -2959,17 +3143,20 @@ class LLMConnectorSelector:
                 has_power = connector_specs.get('mixed_power_signal', False)
                 
                 if required_power and has_power:
-                    attr_score = 1.5 
+                    # User wants power, connector supports it - excellent match
+                    attr_score = 1.5  # Bonus for supporting high power when needed
                     matched_attrs.append(attr)
                     print(f"Connector supports high power/frequency - compatible with answer: {required_power}")
                 elif required_power and not has_power:
-                    attr_score = 0.1 
+                    # User wants power, but connector doesn't support it
+                    attr_score = 0.1  # Reduced from 0.3 to 0.1 - much stronger penalty
                     unmatched_attrs.append(attr)
                     # Add critical mismatch when power is explicitly required but not supported
                     critical_mismatch = True
                     critical_mismatch_factors.append("Mixed power/signal capability required but not supported")
                     print(f"Connector doesn't support required high power/frequency (CRITICAL MISMATCH)")
                 else:
+                    # User doesn't need power, any connector works
                     attr_score = 1.0
                     matched_attrs.append(attr)
                     print(f"High power not required, connector compatible")
@@ -3000,8 +3187,11 @@ class LLMConnectorSelector:
             
             # Special handling for pitch size
             elif attr == 'pitch_size':
+                # Handle string values with "mm" suffix
                 if isinstance(value, str):
+                    # Strip non-numeric characters and convert to float
                     try:
+                        # Fix this part to better handle the 'mm' suffix
                         pitch_value = float(''.join(c for c in value if c.isdigit() or c == '.'))
                     except ValueError:
                         # Default to 0 if conversion fails completely
@@ -3011,7 +3201,7 @@ class LLMConnectorSelector:
                 
                 spec_pitch = connector_specs.get('pitch_size', 0)
                 
-                ## Pitch must match exactly (within small tolerance)
+                # Pitch must match exactly (within small tolerance)
                 if abs(pitch_value - spec_pitch) < 0.05:
                     attr_score = 2.0
                     matched_attrs.append(attr)
@@ -3048,6 +3238,7 @@ class LLMConnectorSelector:
             else:
                 attr_score = 0.5
             
+            # Add the weighted score
             total_weighted_score += adjusted_weight * attr_score
         
         # Prevent division by zero
@@ -3064,6 +3255,7 @@ class LLMConnectorSelector:
         
         mismatch_penalty = 0.0
         if total_weight > 0:
+            # This ensures penalties are proportional and don't drop scores too dramatically
             mismatch_penalty = (total_weight - total_weighted_score) * 1.2  
             
         adjusted_score = max(10.0, base_score - mismatch_penalty) 
@@ -3100,10 +3292,11 @@ class LLMConnectorSelector:
             # Apply stronger penalties for specific critical mismatches
             
             if any("Mixed power/signal capability required but not supported" in factor for factor in critical_mismatch_factors):
-                penalty_factor *= 0.5  
+                penalty_factor *= 0.5  # 50% additional penalty
             
+            # Housing material penalty (increased by 50%)
             if any("Metal housing required but not available" in factor for factor in critical_mismatch_factors):
-                penalty_factor *= 0.5  
+                penalty_factor *= 0.5  # 50% additional penalty for housing material mismatch
             
             final_score *= penalty_factor
             print(f"Critical mismatch for {connector_specs.get('type', 'unknown')}: {', '.join(critical_mismatch_factors)}")
@@ -3114,7 +3307,7 @@ class LLMConnectorSelector:
             
         # Ensure score is between min_score and 100
         return max(min_score, min(100.0, final_score))
-
+    
 def pre_process_routing(user_input, formatted_chat_history):
 
     # Force routing to general for any input with a question mark
